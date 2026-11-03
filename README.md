@@ -91,6 +91,15 @@ searchengine/
 
 ---
 
+## Quick Start & Detailed Instructions
+
+👉 **For comprehensive step-by-step instructions on running the app on Windows and Linux, see [HELP.md](HELP.md).**
+
+- **Windows**: Simply double-click `run_indexer.bat` to automatically set up the virtual environment, install requirements, and open the app.
+- **Linux**: Run `./run_indexer.sh` (or `python -m indexer.main`). In headless SSH environments, it automatically launches the CLI interface.
+
+---
+
 ## Installation & Setup
 
 ### 1. System Dependencies
