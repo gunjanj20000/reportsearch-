@@ -93,16 +93,20 @@ def test_api_export_preview(web_server):
 
 
 def test_api_fs_browse(web_server):
-    """Test /api/fs/browse returns directory listing and shortcuts."""
+    """Test /api/fs/browse returns directory listing, attached devices, network mounts, and shortcuts."""
     with urllib.request.urlopen(f"{web_server}/api/fs/browse") as resp:
         assert resp.status == 200
         data = json.loads(resp.read().decode("utf-8"))
         assert "current_path" in data
         assert "breadcrumbs" in data
         assert "shortcuts" in data
+        assert "attached_devices" in data
+        assert "network_mounts" in data
         assert "subdirectories" in data
         assert isinstance(data["breadcrumbs"], list)
         assert isinstance(data["shortcuts"], list)
+        assert isinstance(data["attached_devices"], list)
+        assert isinstance(data["network_mounts"], list)
         assert isinstance(data["subdirectories"], list)
 
 
@@ -179,3 +183,13 @@ def test_api_fs_network_check_invalid(web_server):
         data = json.loads(resp.read().decode("utf-8"))
         assert data["valid"] is False
         assert "error" in data
+
+def test_get_attached_storage_devices():
+    """Test detection of attached devices returns a list of dictionaries with name and path."""
+    from indexer.web import get_attached_storage_devices
+    devices = get_attached_storage_devices()
+    assert isinstance(devices, list)
+    for dev in devices:
+        assert "name" in dev
+        assert "path" in dev
+        assert "type" in dev

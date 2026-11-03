@@ -7,6 +7,7 @@ Works in any browser without requiring PySide6/Qt or GUI libraries.
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,15 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import logger, DEFAULT_DB_PATH, EXPORTS_DIR, find_libreoffice_binary, find_tesseract_binary, format_bytes, resolve_network_path
+from .config import (
+    logger,
+    DEFAULT_DB_PATH,
+    EXPORTS_DIR,
+    find_libreoffice_binary,
+    find_tesseract_binary,
+    format_bytes,
+    resolve_network_path,
+)
 from .database.connection import DatabaseManager
 from .engine.indexer_engine import IndexerEngine
 from .search.search_service import SearchService, SearchResponse
@@ -117,6 +126,88 @@ def open_native_folder_dialog(initial_dir: Optional[str] = None) -> Tuple[bool, 
 
     return False, None, "Native OS file dialog not supported on this host environment without desktop display."
 
+
+def get_attached_storage_devices() -> List[Dict[str, str]]:
+    """
+    Detect connected removable storage devices:
+    - USB pendrives / flash drives
+    - External hard drives / SSDs
+    - SD cards
+    - Mounts under /media, /run/media, and /mnt
+    - Windows drive letters
+    """
+    devices: List[Dict[str, str]] = []
+    seen = set()
+    excluded = ("/boot", "/sys", "/proc", "/dev", "/run/lock", "/run/systemd")
+
+    # 1. Linux removable media detection
+    if sys.platform.startswith("linux") or "bsd" in sys.platform:
+        candidate_roots = ["/media", "/run/media", "/mnt"]
+        for base in ["/media", "/run/media"]:
+            if os.path.exists(base):
+                try:
+                    for entry in os.scandir(base):
+                        if entry.is_dir(follow_symlinks=False):
+                            candidate_roots.append(entry.path)
+                except Exception:
+                    pass
+
+        for root in candidate_roots:
+            if os.path.exists(root) and os.path.isdir(root):
+                try:
+                    for entry in os.scandir(root):
+                        if entry.is_dir(follow_symlinks=False):
+                            full_path = str(Path(entry.path).resolve())
+                            if full_path not in seen and not any(full_path.startswith(ex) for ex in excluded):
+                                name_lower = entry.name.lower()
+                                icon = "🔌" if any(w in name_lower for w in ["usb", "pen", "flash", "thumb", "sd"]) else "💾"
+                                devices.append({
+                                    "name": f"{icon} {entry.name}",
+                                    "path": full_path,
+                                    "type": "removable"
+                                })
+                                seen.add(full_path)
+                except Exception:
+                    pass
+
+        # Also inspect /proc/mounts for external block devices
+        if os.path.exists("/proc/mounts"):
+            target_fs = {"vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "ext4", "iso9660"}
+            try:
+                with open("/proc/mounts", "r") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 3:
+                            dev, mnt, fst = parts[0], parts[1], parts[2]
+                            if (dev.startswith(("/dev/sd", "/dev/mmc", "/dev/disk")) or mnt.startswith(("/media", "/run/media", "/mnt"))) and fst in target_fs:
+                                if mnt not in seen and not any(mnt.startswith(ex) for ex in excluded) and mnt not in ("/", "/home", "/tmp"):
+                                    label = os.path.basename(mnt) or mnt
+                                    icon = "🔌" if any(w in label.lower() for w in ["usb", "pen", "flash", "sd"]) else "💾"
+                                    devices.append({
+                                        "name": f"{icon} {label} ({fst})",
+                                        "path": str(Path(mnt).resolve()),
+                                        "type": "removable"
+                                    })
+                                    seen.add(mnt)
+            except Exception:
+                pass
+
+    # 2. Windows Drive Letters
+    elif sys.platform == "win32":
+        import string
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\\\"
+            if os.path.exists(drive):
+                label = f"💾 Drive {letter}:"
+                devices.append({
+                    "name": label,
+                    "path": drive,
+                    "type": "drive"
+                })
+
+    return devices
+
+
 def get_system_network_mounts() -> List[Dict[str, str]]:
     """
     Detect active network mounts, CIFS/Samba shares, NFS exports, and GVFS connections.
@@ -180,7 +271,7 @@ def get_system_network_mounts() -> List[Dict[str, str]]:
     if sys.platform == "win32":
         import string
         for letter in string.ascii_uppercase[2:]:
-            drive = f"{letter}:\\"
+            drive = f"{letter}:\\\\"
             if os.path.exists(drive):
                 try:
                     mounts.append({
@@ -195,9 +286,9 @@ def get_system_network_mounts() -> List[Dict[str, str]]:
     return mounts
 
 
-def test_network_path(path_str: str) -> Dict[str, Any]:
+def test_storage_path(path_str: str) -> Dict[str, Any]:
     """
-    Validates a network folder or UNC path.
+    Validates any local folder, USB drive, external hard disk, or network share / UNC path.
     Tests accessibility, counts files/documents, and resolves GVFS/SMB mappings.
     """
     clean = path_str.strip()
@@ -207,10 +298,10 @@ def test_network_path(path_str: str) -> Dict[str, Any]:
     resolved = resolve_network_path(clean)
     p = Path(resolved)
 
-    # If doesn't exist, try gio mount if on Linux and it starts with smb:// or \
-    if not p.exists() and sys.platform.startswith("linux") and (clean.startswith(("\\", "//", "smb://"))):
+    # If doesn't exist, try gio mount if on Linux and it starts with smb:// or \\
+    if not p.exists() and sys.platform.startswith("linux") and (clean.startswith(("\\\\", "//", "smb://"))):
         smb_url = clean
-        if clean.startswith(("\\", "//")):
+        if clean.startswith(("\\\\", "//")):
             smb_url = "smb://" + clean.lstrip("\\/").replace("\\", "/")
 
         gio = shutil.which("gio")
@@ -228,7 +319,7 @@ def test_network_path(path_str: str) -> Dict[str, Any]:
         return {
             "valid": False,
             "resolved_path": resolved,
-            "error": f"Folder '{clean}' could not be reached or does not exist. Ensure the network share is online and accessible."
+            "error": f"Folder '{clean}' could not be reached or does not exist. Ensure the drive or network share is connected."
         }
 
     if not p.is_dir():
@@ -253,13 +344,13 @@ def test_network_path(path_str: str) -> Dict[str, Any]:
         return {
             "valid": False,
             "resolved_path": resolved,
-            "error": f"Permission denied accessing '{clean}'. Please check network share credentials."
+            "error": f"Permission denied accessing '{clean}'. Please check storage device permissions."
         }
     except Exception as e:
         return {
             "valid": False,
             "resolved_path": resolved,
-            "error": f"Error accessing network path: {e}"
+            "error": f"Error accessing folder: {e}"
         }
 
     return {
@@ -268,9 +359,8 @@ def test_network_path(path_str: str) -> Dict[str, Any]:
         "resolved_path": str(p.resolve()),
         "doc_count_est": doc_count,
         "sample_files": sample_files,
-        "message": f"Successfully connected! Found {doc_count} medical documents in this network folder."
+        "message": f"Successfully connected! Found {doc_count} medical documents in this folder."
     }
-
 
 
 # Global state for web server background tasks
@@ -482,13 +572,14 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 self.send_error(404, "Export file not found.")
                 return
 
-        # 8. Filesystem Browse API
+        # 8. Filesystem Browse API (Local, USB Pendrives, External HDDs, and Network Mounts)
         if path == "/api/fs/browse":
             req_dir = params.get("path", [""])[0].strip()
             if not req_dir:
                 target_dir = Path.home().resolve()
             else:
-                target_dir = Path(req_dir).resolve()
+                resolved_p = resolve_network_path(req_dir)
+                target_dir = Path(resolved_p).resolve()
 
             if not target_dir.exists() or not target_dir.is_dir():
                 target_dir = Path.home().resolve()
@@ -516,7 +607,7 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             breadcrumbs.append({"name": str(curr), "path": str(curr)})
             breadcrumbs.reverse()
 
-            # Helpful shortcuts
+            # Helpful local shortcuts
             home = Path.home().resolve()
             raw_shortcuts = [
                 {"name": "🏠 Home (~)", "path": str(home)},
@@ -537,24 +628,33 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             else:
                 import string
                 for letter in string.ascii_uppercase:
-                    dp = letter + ":\\"
+                    dp = letter + ":\\\\"
                     if os.path.exists(dp):
                         raw_shortcuts.append({"name": f"💾 Drive {letter}:", "path": dp})
 
             valid_shortcuts = [s for s in raw_shortcuts if os.path.isdir(s["path"])]
+
+            # Detect attached USB drives and external hard drives
+            attached_devices = get_attached_storage_devices()
+
+            # Detect network mounts
+            network_mounts = get_system_network_mounts()
 
             self.send_json({
                 "current_path": str(target_dir),
                 "parent_path": str(target_dir.parent) if target_dir.parent != target_dir else None,
                 "breadcrumbs": breadcrumbs,
                 "shortcuts": valid_shortcuts,
+                "attached_devices": attached_devices,
+                "network_mounts": network_mounts,
                 "subdirectories": subdirs
             })
             return
 
-        # 9. Active Network Mounts API
-        if path == "/api/fs/network_mounts":
+        # 9. Active Network Mounts & Devices API
+        if path in ("/api/fs/network_mounts", "/api/fs/devices"):
             self.send_json({
+                "devices": get_attached_storage_devices(),
                 "mounts": get_system_network_mounts()
             })
             return
@@ -609,7 +709,7 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # 10. Serve Embedded Modern Web App HTML
+        # 11. Serve Embedded Modern Web App HTML
         if path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -727,10 +827,10 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # 7. Network Share & UNC Path Verification API
-        if path == "/api/fs/network_check":
-            net_path = data.get("path", "").strip()
-            res = test_network_path(net_path)
+        # 7. Storage Path & Network Share Verification API
+        if path in ("/api/fs/network_check", "/api/fs/check_path"):
+            test_path = data.get("path", "").strip()
+            res = test_storage_path(test_path)
             self.send_json(res)
             return
 
@@ -937,7 +1037,7 @@ SPA_HTML = r"""<!DOCTYPE html>
     }
     .folder-action-buttons {
       display: flex;
-      gap: 10px;
+      gap: 12px;
       align-items: center;
       margin-top: 14px;
       flex-wrap: wrap;
@@ -1126,7 +1226,7 @@ SPA_HTML = r"""<!DOCTYPE html>
       font-style: italic;
     }
 
-    /* Modal Overlays & Dialogs */
+    /* Modal Overlays & Unified Storage Dialog */
     .modal-overlay {
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
@@ -1142,8 +1242,8 @@ SPA_HTML = r"""<!DOCTYPE html>
       background: white;
       border-radius: 12px;
       width: 100%;
-      max-width: 760px;
-      max-height: 85vh;
+      max-width: 820px;
+      max-height: 88vh;
       display: flex;
       flex-direction: column;
       box-shadow: var(--shadow-lg);
@@ -1176,31 +1276,36 @@ SPA_HTML = r"""<!DOCTYPE html>
       border-radius: 4px;
     }
     .modal-close:hover { background: #e2e8f0; color: var(--text); }
-    .modal-subbanner {
-      padding: 0.6rem 1.25rem;
-      background: #f1f5f9;
-      border-bottom: 1px solid var(--border);
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .fb-shortcuts {
+    
+    /* Storage Shortcuts Bar in Unified Modal */
+    .fb-shortcuts-section {
       padding: 0.65rem 1.25rem;
       background: #ffffff;
       border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .fb-shortcuts-category {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
       align-items: center;
     }
+    .fb-category-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      min-width: 90px;
+    }
     .fb-shortcut-pill {
       background: #f1f5f9;
       border: 1px solid #e2e8f0;
       border-radius: 9999px;
-      padding: 4px 11px;
-      font-size: 0.82rem;
+      padding: 3px 10px;
+      font-size: 0.8rem;
       font-weight: 500;
       cursor: pointer;
       color: #334155;
@@ -1211,9 +1316,52 @@ SPA_HTML = r"""<!DOCTYPE html>
       color: #0369a1;
       border-color: #7dd3fc;
     }
-    .fb-nav-bar {
-      padding: 0.6rem 1.25rem;
+    .pill-device {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+      color: #166534;
+      font-weight: 600;
+    }
+    .pill-device:hover {
+      background: #dcfce7;
+      border-color: #86efac;
+      color: #15803d;
+    }
+    .pill-network {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+      color: #1d4ed8;
+      font-weight: 600;
+    }
+    .pill-network:hover {
+      background: #dbeafe;
+      border-color: #93c5fd;
+      color: #1e40af;
+    }
+
+    /* Direct Path Bar inside Modal */
+    .fb-path-bar {
+      padding: 0.65rem 1.25rem;
       background: #f8fafc;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .fb-path-input {
+      flex: 1;
+      padding: 0.45rem 0.75rem;
+      font-size: 0.88rem;
+      font-family: monospace;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      outline: none;
+    }
+    .fb-path-input:focus { border-color: var(--primary); }
+
+    .fb-nav-bar {
+      padding: 0.55rem 1.25rem;
+      background: #ffffff;
       border-bottom: 1px solid var(--border);
       display: flex;
       gap: 10px;
@@ -1242,7 +1390,7 @@ SPA_HTML = r"""<!DOCTYPE html>
       padding: 0.75rem 1.25rem;
       overflow-y: auto;
       flex: 1;
-      max-height: 380px;
+      max-height: 350px;
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
       gap: 6px;
@@ -1450,7 +1598,7 @@ SPA_HTML = r"""<!DOCTYPE html>
     <button class="tab-btn" onclick="switchTab('tabExport')">4. Mobile PWA Export</button>
   </div>
 
-  <!-- Tab 1: Indexer (Decluttered, single Browse Folder button) -->
+  <!-- Tab 1: Indexer (Decluttered, single unified Browse Folder button) -->
   <div id="tabIndexer" class="tab-content active">
     <div class="card card-centered">
       <div class="card-title-bar">
@@ -1460,7 +1608,7 @@ SPA_HTML = r"""<!DOCTYPE html>
 
       <div class="folder-selection-card">
         <div class="folder-selection-header">
-          <div class="folder-icon-box">📁</div>
+          <div class="folder-icon-box" id="displayFolderIcon">📁</div>
           <div class="folder-meta-box">
             <span class="folder-label">SOURCE FOLDER TO SCAN:</span>
             <div id="displayCurrentFolder" class="folder-path-text">
@@ -1470,16 +1618,10 @@ SPA_HTML = r"""<!DOCTYPE html>
         </div>
 
         <div class="folder-action-buttons">
-          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnBrowseFolder" title="Choose any local or mounted folder">
+          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnBrowseFolder" title="Browse local folders, attached USB pendrives, external hard drives, or network shares" style="font-size: 1rem; padding: 0.75rem 1.6rem;">
             <span>📂</span> <strong>Browse Folder...</strong>
           </button>
-          <button class="btn btn-secondary" onclick="openNetworkFolderModal()" id="btnNetworkFolder" title="Connect to a network share, Windows UNC path, or NAS">
-            <span>🌐</span> <strong>Network Folder...</strong>
-          </button>
-          <button class="btn btn-secondary" onclick="resetToSampleCorpus()" title="Switch back to sample corpus">
-            <span>📚</span> Use Sample Corpus
-          </button>
-          <button class="btn btn-success" id="btnStartScan" onclick="startScan()" style="margin-left: auto;">
+          <button class="btn btn-success" id="btnStartScan" onclick="startScan()" style="margin-left: auto; font-size: 1rem; padding: 0.75rem 1.8rem;">
             <span>🚀</span> <strong>Start Indexing</strong>
           </button>
         </div>
@@ -1502,7 +1644,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         <span id="progressPct">0%</span>
       </div>
 
-      <div class="log-box" id="activityLogs">Indexer ready. Click 'Browse Folder...' to select a folder or 'Start Indexing' to begin.</div>
+      <div class="log-box" id="activityLogs">Indexer ready. Click 'Browse Folder...' to select a local directory, USB pendrive, external hard disk, or network share, then click 'Start Indexing'.</div>
     </div>
   </div>
 
@@ -1598,20 +1740,45 @@ SPA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Folder Browser Modal (Interactive Directory Explorer) -->
+<!-- Unified Storage & Folder Browser Modal (Local, Attached USB, External HDD, and Network Shares) -->
 <div id="folderBrowserModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closeFolderBrowser();">
   <div class="modal-box">
     <div class="modal-header">
       <div class="modal-header-title">
-        <span>📂</span> Select Folder for Indexing
+        <span>📂</span> Browse Storage & Select Folder
       </div>
       <button class="modal-close" onclick="closeFolderBrowser()" title="Close (Esc)">✕</button>
     </div>
 
-    <!-- Shortcuts -->
-    <div class="fb-shortcuts" id="fbShortcuts"></div>
+    <!-- Storage Shortcuts Section (Local, USB Pendrives, External HDDs, Network Shares) -->
+    <div class="fb-shortcuts-section">
+      <!-- Attached Removable Devices (Pendrives / External Hard Drives) -->
+      <div class="fb-shortcuts-category" id="fbDevicesRow" style="display:none;">
+        <span class="fb-category-label">🔌 Attached:</span>
+        <div id="fbDevicesPills" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+      </div>
 
-    <!-- Navigation Bar -->
+      <!-- Network Shares -->
+      <div class="fb-shortcuts-category" id="fbNetworkRow" style="display:none;">
+        <span class="fb-category-label">🌐 Network:</span>
+        <div id="fbNetworkPills" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+      </div>
+
+      <!-- Local Shortcuts -->
+      <div class="fb-shortcuts-category">
+        <span class="fb-category-label">📁 Local:</span>
+        <div id="fbLocalPills" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+      </div>
+    </div>
+
+    <!-- Direct Path Entry / UNC Network Share Input -->
+    <div class="fb-path-bar">
+      <span style="font-size:0.8rem; font-weight:700; color:var(--text-muted);">PATH:</span>
+      <input type="text" id="fbDirectInput" class="fb-path-input" placeholder="Enter path or \\server\share or /media/user/USB..." onkeydown="if(event.key==='Enter')fbGoDirect();">
+      <button class="btn btn-sm btn-primary" onclick="fbGoDirect()">Go / Connect</button>
+    </div>
+
+    <!-- Navigation & Breadcrumbs -->
     <div class="fb-nav-bar">
       <button class="btn btn-sm btn-secondary" id="fbUpBtn" onclick="fbGoUp()">⬆️ Up</button>
       <div class="fb-breadcrumbs" id="fbBreadcrumbs"></div>
@@ -1625,7 +1792,7 @@ SPA_HTML = r"""<!DOCTYPE html>
     <!-- Modal Footer -->
     <div class="modal-footer">
       <div class="modal-footer-info">
-        <span class="modal-footer-label">Selected:</span>
+        <span class="modal-footer-label">Selected Folder:</span>
         <span id="fbSelectedPath" class="modal-footer-path"></span>
       </div>
       <div style="display: flex; gap: 8px;">
@@ -1634,49 +1801,6 @@ SPA_HTML = r"""<!DOCTYPE html>
           ✅ Select This Folder
         </button>
       </div>
-    </div>
-  </div>
-</div>
-
-<!-- Network Folder Modal (UNC / SMB / CIFS / NFS Shares) -->
-<div id="networkFolderModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closeNetworkFolderModal();">
-  <div class="modal-box" style="max-width: 680px;">
-    <div class="modal-header">
-      <div class="modal-header-title">
-        <span>🌐</span> Connect Network Folder / UNC Share
-      </div>
-      <button class="modal-close" onclick="closeNetworkFolderModal()" title="Close (Esc)">✕</button>
-    </div>
-
-    <div style="padding: 1.25rem 1.5rem;">
-      <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">
-        Enter a Windows UNC path (e.g. <code>\\server\share\folder</code>), an SMB share (e.g. <code>smb://192.168.1.100/records</code>), or a network mount path (e.g. <code>/mnt/nas/reports</code>).
-      </p>
-
-      <div style="display: flex; gap: 8px; margin-bottom: 1rem;">
-        <input type="text" id="netPathInput" placeholder="\\192.168.1.50\cardiology or /mnt/nfs" style="flex: 1; padding: 0.7rem 0.9rem; border-radius: 7px; border: 1.5px solid var(--border); font-family: monospace; font-size: 0.95rem;" onkeydown="if(event.key==='Enter')checkAndApplyNetworkPath();">
-        <button class="btn btn-primary" onclick="checkAndApplyNetworkPath()" id="btnTestNetPath">
-          🔍 Connect & Verify
-        </button>
-      </div>
-
-      <!-- Verification Result Box -->
-      <div id="netStatusBox" style="display: none; padding: 1rem; border-radius: 8px; margin-bottom: 1.25rem; font-size: 0.9rem;"></div>
-
-      <!-- Detected Network Mounts on Host -->
-      <div style="border-top: 1px solid var(--border); padding-top: 1rem;">
-        <div style="font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.6rem;">
-          Detected Active Network Shares & Mounts:
-        </div>
-        <div id="detectedNetMountsList" style="display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto;">
-          <div style="color: var(--text-muted); font-size: 0.88rem; font-style: italic;">Scanning network mounts...</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal-footer">
-      <span style="font-size: 0.8rem; color: var(--text-muted);">Supports CIFS, SMB, NFS, and Windows UNC shares.</span>
-      <button class="btn btn-secondary" onclick="closeNetworkFolderModal()">Close</button>
     </div>
   </div>
 </div>
@@ -1693,7 +1817,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="note-header-actions">
-        <button class="btn btn-sm btn-secondary" onclick="copyNoteContent()" title="Copy text to clipboard">📋 Copy</button>
+        <button class="btn btn-sm btn-secondary" onclick="copyNoteContent()" title="Copy text to clipboard">📋 Copy Note</button>
         <button class="modal-close" onclick="closePageNote()" title="Close (Esc)">✕</button>
       </div>
     </div>
@@ -1739,111 +1863,7 @@ SPA_HTML = r"""<!DOCTYPE html>
     if (tabId === 'tabExport') loadExportPreview();
   }
 
-
-  // --- Network Folder Functions ---
-  async function openNetworkFolderModal() {
-    const modal = document.getElementById('networkFolderModal');
-    if (modal) modal.style.display = 'flex';
-    document.getElementById('netStatusBox').style.display = 'none';
-    await loadDetectedNetworkMounts();
-  }
-
-  function closeNetworkFolderModal() {
-    const modal = document.getElementById('networkFolderModal');
-    if (modal) modal.style.display = 'none';
-  }
-
-  async function loadDetectedNetworkMounts() {
-    const listEl = document.getElementById('detectedNetMountsList');
-    if (!listEl) return;
-
-    try {
-      const res = await fetch('/api/fs/network_mounts');
-      const data = await res.json();
-      if (!data.mounts || data.mounts.length === 0) {
-        listEl.innerHTML = '<div style="color: #94a3b8; font-size: 0.88rem; padding: 0.5rem 0;">No mounted shares automatically detected. You can enter your share path above (e.g. \\\\server\\share or /mnt/share).</div>';
-      } else {
-        listEl.innerHTML = data.mounts.map(m => `
-          <div style="display:flex; justify-content:space-between; align-items:center; background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:8px 12px;">
-            <div>
-              <div style="font-weight:600; font-size:0.9rem;">${escapeHtml(m.name)}</div>
-              <div style="font-family:monospace; font-size:0.8rem; color:var(--text-muted);">${escapeHtml(m.path)}</div>
-            </div>
-            <button class="btn btn-sm btn-primary" onclick="selectNetworkShare('${encodeURIComponent(m.path)}')">
-              ✅ Select
-            </button>
-          </div>
-        `).join('');
-      }
-    } catch (e) {
-      listEl.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem;">Mount detection: ${escapeHtml(e.message)}</div>`;
-    }
-  }
-
-  async function checkAndApplyNetworkPath() {
-    const input = document.getElementById('netPathInput');
-    const pathVal = input.value.trim();
-    if (!pathVal) return;
-
-    const btn = document.getElementById('btnTestNetPath');
-    btn.disabled = true;
-    btn.textContent = '⏳ Checking...';
-
-    const statusBox = document.getElementById('netStatusBox');
-    statusBox.style.display = 'block';
-    statusBox.style.background = '#f8fafc';
-    statusBox.style.border = '1px solid var(--border)';
-    statusBox.innerHTML = 'Connecting to network share and testing accessibility...';
-
-    try {
-      const res = await fetch('/api/fs/network_check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: pathVal })
-      });
-      const data = await res.json();
-
-      if (data.valid) {
-        statusBox.style.background = '#f0fdf4';
-        statusBox.style.border = '1px solid #86efac';
-        statusBox.innerHTML = `
-          <div style="color: #166534; font-weight: 700; margin-bottom: 4px;">✅ Network Share Accessible!</div>
-          <div style="color: #15803d; font-size: 0.88rem; margin-bottom: 8px;">${escapeHtml(data.message)}</div>
-          <button class="btn btn-sm btn-success" onclick="selectNetworkShare('${encodeURIComponent(data.resolved_path)}', '${encodeURIComponent(data.original_path)}')">
-            ✅ Use This Folder for Indexing
-          </button>
-        `;
-      } else {
-        statusBox.style.background = '#fef2f2';
-        statusBox.style.border = '1px solid #fca5a5';
-        statusBox.innerHTML = `
-          <div style="color: #991b1b; font-weight: 700; margin-bottom: 4px;">❌ Connection Failed</div>
-          <div style="color: #b91c1c; font-size: 0.88rem;">${escapeHtml(data.error || 'Share is not reachable.')}</div>
-        `;
-      }
-    } catch (e) {
-      statusBox.style.background = '#fef2f2';
-      statusBox.style.border = '1px solid #fca5a5';
-      statusBox.innerHTML = `<div style="color:#b91c1c;">Connection error: ${escapeHtml(e.message)}</div>`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '🔍 Connect & Verify';
-    }
-  }
-
-  function selectNetworkShare(encodedResolved, encodedOriginal) {
-    const resolved = decodeURIComponent(encodedResolved);
-    const original = encodedOriginal ? decodeURIComponent(encodedOriginal) : resolved;
-    currentSelectedFolderPath = resolved;
-    const el = document.getElementById('displayCurrentFolder');
-    if (el) {
-      el.innerHTML = `🌐 <strong>${escapeHtml(original)}</strong> <span style="font-size:0.8rem; color:var(--text-muted); font-weight:normal;">(${escapeHtml(resolved)})</span>`;
-    }
-    closeNetworkFolderModal();
-    alert(`Network folder selected: ${original}\n\nClick '🚀 Start Indexing' to begin scanning.`);
-  }
-
-  // --- Folder Browser ---
+  // --- Unified Folder & Storage Browser ---
   function openFolderBrowser() {
     const modal = document.getElementById('folderBrowserModal');
     if (modal) modal.style.display = 'flex';
@@ -1858,7 +1878,7 @@ SPA_HTML = r"""<!DOCTYPE html>
   async function loadDirectory(path) {
     const listEl = document.getElementById('fbDirList');
     if (!listEl) return;
-    listEl.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">Loading directory...</div>';
+    listEl.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">Loading storage...</div>';
 
     try {
       const url = '/api/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
@@ -1872,6 +1892,9 @@ SPA_HTML = r"""<!DOCTYPE html>
       const pathDisplay = document.getElementById('fbSelectedPath');
       if (pathDisplay) pathDisplay.textContent = browserCurrentPath;
 
+      const inputDisplay = document.getElementById('fbDirectInput');
+      if (inputDisplay) inputDisplay.value = browserCurrentPath;
+
       const upBtn = document.getElementById('fbUpBtn');
       if (upBtn) {
         const canGoUp = Boolean(browserParentPath && browserParentPath !== browserCurrentPath);
@@ -1879,10 +1902,36 @@ SPA_HTML = r"""<!DOCTYPE html>
         upBtn.style.opacity = canGoUp ? '1' : '0.4';
       }
 
-      // Render Shortcuts
-      const shortcutsEl = document.getElementById('fbShortcuts');
-      if (shortcutsEl && data.shortcuts) {
-        shortcutsEl.innerHTML = data.shortcuts.map(s => {
+      // Render Attached Removable Devices (USB Pendrives, External HDDs)
+      const devRow = document.getElementById('fbDevicesRow');
+      const devPills = document.getElementById('fbDevicesPills');
+      if (data.attached_devices && data.attached_devices.length > 0) {
+        devRow.style.display = 'flex';
+        devPills.innerHTML = data.attached_devices.map(d => {
+          const safeP = encodeURIComponent(d.path);
+          return `<span class="fb-shortcut-pill pill-device" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(d.name)}</span>`;
+        }).join('');
+      } else {
+        devRow.style.display = 'none';
+      }
+
+      // Render Network Shares
+      const netRow = document.getElementById('fbNetworkRow');
+      const netPills = document.getElementById('fbNetworkPills');
+      if (data.network_mounts && data.network_mounts.length > 0) {
+        netRow.style.display = 'flex';
+        netPills.innerHTML = data.network_mounts.map(m => {
+          const safeP = encodeURIComponent(m.path);
+          return `<span class="fb-shortcut-pill pill-network" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(m.name)}</span>`;
+        }).join('');
+      } else {
+        netRow.style.display = 'none';
+      }
+
+      // Render Local Shortcuts
+      const localPills = document.getElementById('fbLocalPills');
+      if (localPills && data.shortcuts) {
+        localPills.innerHTML = data.shortcuts.map(s => {
           const safeP = encodeURIComponent(s.path);
           return `<span class="fb-shortcut-pill" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(s.name)}</span>`;
         }).join('');
@@ -1922,11 +1971,43 @@ SPA_HTML = r"""<!DOCTYPE html>
     browserCurrentPath = path;
     const pathDisplay = document.getElementById('fbSelectedPath');
     if (pathDisplay) pathDisplay.textContent = path;
+    const inputDisplay = document.getElementById('fbDirectInput');
+    if (inputDisplay) inputDisplay.value = path;
   }
 
   function fbGoUp() {
     if (browserParentPath) {
       loadDirectory(browserParentPath);
+    }
+  }
+
+  async function fbGoDirect() {
+    const input = document.getElementById('fbDirectInput');
+    const val = input.value.trim();
+    if (!val) return;
+
+    // Check if network UNC or non-local path
+    if (val.startsWith('\\\\') || val.startsWith('//') || val.startsWith('smb://')) {
+      input.disabled = true;
+      try {
+        const res = await fetch('/api/fs/check_path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: val })
+        });
+        const d = await res.json();
+        if (d.valid) {
+          loadDirectory(d.resolved_path);
+        } else {
+          alert('Network Share Error: ' + (d.error || 'Could not reach share.'));
+        }
+      } catch (e) {
+        loadDirectory(val);
+      } finally {
+        input.disabled = false;
+      }
+    } else {
+      loadDirectory(val);
     }
   }
 
@@ -1938,15 +2019,26 @@ SPA_HTML = r"""<!DOCTYPE html>
     closeFolderBrowser();
   }
 
-  function resetToSampleCorpus() {
-    currentSelectedFolderPath = 'sample_corpus';
-    updateSelectedFolderDisplay();
-  }
-
   function updateSelectedFolderDisplay() {
     const el = document.getElementById('displayCurrentFolder');
-    if (el) {
-      el.textContent = currentSelectedFolderPath || 'sample_corpus (Default Medical Literature Archive)';
+    const iconEl = document.getElementById('displayFolderIcon');
+    if (!el) return;
+
+    const p = currentSelectedFolderPath || 'sample_corpus';
+    const pLower = p.toLowerCase();
+
+    if (pLower.includes('sample_corpus')) {
+      if (iconEl) iconEl.textContent = '📚';
+      el.textContent = 'sample_corpus (Default Medical Literature Archive)';
+    } else if (pLower.startsWith('\\\\') || pLower.startsWith('smb://') || pLower.includes('gvfs')) {
+      if (iconEl) iconEl.textContent = '🌐';
+      el.textContent = `Network Share: ${p}`;
+    } else if (pLower.includes('/media/') || pLower.includes('/run/media/') || pLower.includes('usb')) {
+      if (iconEl) iconEl.textContent = '🔌';
+      el.textContent = `Attached Device: ${p}`;
+    } else {
+      if (iconEl) iconEl.textContent = '📁';
+      el.textContent = p;
     }
   }
 
@@ -2277,7 +2369,6 @@ SPA_HTML = r"""<!DOCTYPE html>
     if (e.key === 'Escape') {
       closePageNote();
       closeFolderBrowser();
-      closeNetworkFolderModal();
     }
   });
 
