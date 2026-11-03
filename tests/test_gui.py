@@ -73,3 +73,37 @@ def test_dashboard_widget_updates(qapp):
         assert window.dashboard.card_word_docs.value_label.text() == "60"
         assert window.dashboard.card_scanned_pdfs.value_label.text() == "15"
         assert window.dashboard.card_last_indexed.value_label.text() == "2026-11-03 10:00:00"
+
+
+def test_gui_search_tab_interaction(qapp):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_path = Path(tmp_dir) / "test_gui_search.db"
+        db = DatabaseManager(db_path)
+        engine = IndexerEngine(db_manager=db)
+
+        # Seed document
+        from indexer.models import ExtractedDocument, ExtractedPage, ExtractedParagraph
+        doc = ExtractedDocument(
+            filename="Bifurcation_Study.docx",
+            extension=".docx",
+            file_size=12000,
+            modified_time=1700000000.0,
+            sha256="hash_gui",
+            source_path="/docs/Bifurcation_Study.docx",
+            title="Bifurcation Stenting Provisional Guide",
+            page_count=1,
+            pages=[ExtractedPage(page_number=1, text="Provisional stenting for coronary bifurcation lesions.")],
+            paragraphs=[ExtractedParagraph(page_number=1, paragraph_number=1, text="Provisional stenting for coronary bifurcation lesions.")]
+        )
+        db.save_document(doc)
+
+        window = MainWindow(engine=engine)
+        assert window.tabs.count() == 2
+        assert window.search_tab is not None
+
+        # Execute search in SearchTab
+        window.search_tab.search_input.setText("bifurcation")
+        window.search_tab._on_search()
+
+        assert "Found <b>1</b>" in window.search_tab.lbl_info.text()
+        assert window.search_tab.results_layout.count() >= 1

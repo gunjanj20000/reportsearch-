@@ -85,6 +85,25 @@ def main() -> None:
     clear_p = subparsers.add_parser("clear", help="Reset/clear the entire search database")
     clear_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
 
+    # Search command (Phase 2)
+    search_p = subparsers.add_parser("search", help="Execute FTS5 search query")
+    search_p.add_argument("query", help="Search query string")
+    search_p.add_argument("--synonyms", action="store_true", help="Enable cardiology synonym expansion")
+    search_p.add_argument("--ext", nargs="+", help="Filter by extensions (e.g. .pdf .docx)")
+    search_p.add_argument("--page", type=int, default=1, help="Page number")
+    search_p.add_argument("--limit", type=int, default=10, help="Results per page")
+    search_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
+
+    # Suggest command (Phase 2)
+    suggest_p = subparsers.add_parser("suggest", help="Get autocomplete suggestions")
+    suggest_p.add_argument("prefix", help="Term prefix to auto-complete")
+    suggest_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
+
+    # Synonyms management command (Phase 2)
+    syn_p = subparsers.add_parser("synonyms", help="View or add cardiology synonyms")
+    syn_p.add_argument("--add", nargs=2, metavar=("TERM", "EXPANSION"), help="Add a custom synonym")
+    syn_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
+
     args = parser.parse_args()
 
     if args.command == "stats":
@@ -103,6 +122,56 @@ def main() -> None:
         db.clear_database()
         print("Database wiped successfully.")
         print_stats(args.db)
+    elif args.command == "search":
+        db = DatabaseManager(args.db)
+        search_svc = db.get_search_service()
+        res = search_svc.search(
+            query=args.query,
+            page=args.page,
+            page_size=args.limit,
+            expand_synonyms=args.synonyms,
+            extensions=args.ext
+        )
+        print("\n" + "=" * 60)
+        print(f"SEARCH RESULTS: {res.total_count} matches found in {res.execution_time_ms:.2f} ms")
+        print(f"Query: {res.query!r}")
+        print(f"Parsed FTS: {res.parsed_fts_query!r}")
+        if res.expanded_query:
+            print(f"Synonym Expansion: {res.expanded_query}")
+            for t, exp in res.synonyms_applied:
+                print(f"  → {t} expanded to: {exp}")
+        print("=" * 60)
+
+        for idx, item in enumerate(res.items, start=(res.page - 1) * res.page_size + 1):
+            clean_snip = item.snippet.replace("<mark>", "\033[1;33m").replace("</mark>", "\033[0m")
+            print(f"\n{idx}. [{item.extension.upper()}] {item.title}")
+            print(f"   File: {item.filename} (Page {item.page_number}, Para {item.paragraph_number}) | BM25 Rank: {item.rank_score}")
+            print(f"   Snippet: {clean_snip}")
+
+        print(f"\nPage {res.page} of {res.total_pages} (Total: {res.total_count})\n")
+    elif args.command == "suggest":
+        db = DatabaseManager(args.db)
+        search_svc = db.get_search_service()
+        suggestions = search_svc.get_suggestions(args.prefix)
+        print(f"\nAuto-complete suggestions for prefix '{args.prefix}':")
+        for s in suggestions:
+            print(f"  • [{s['type'].upper()}] {s['display']}")
+        print()
+    elif args.command == "synonyms":
+        db = DatabaseManager(args.db)
+        syn_mgr = db.get_search_service().synonym_manager
+        if args.add:
+            term, expansion = args.add
+            syn_id = syn_mgr.add(term, expansion)
+            print(f"Added synonym #{syn_id}: {term} → {expansion}")
+        else:
+            all_syns = syn_mgr.get_all()
+            print(f"\nCardiology Synonym Dictionary ({len(all_syns)} terms):")
+            print("-" * 50)
+            for s in all_syns:
+                status = "✓" if s["enabled"] else "✗"
+                print(f"  [{status}] {s['term']:<8} → {s['expansion']}")
+            print("-" * 50 + "\n")
     else:
         parser.print_help()
 

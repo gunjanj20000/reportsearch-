@@ -8,12 +8,13 @@ from typing import List
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QListWidget, QProgressBar, QTextEdit, QFileDialog,
-    QMessageBox, QGroupBox, QSplitter, QStatusBar, QFrame
+    QMessageBox, QGroupBox, QSplitter, QStatusBar, QFrame, QTabWidget
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon
 
 from .dashboard_widget import DashboardWidget
+from .search_tab import SearchTab
 from .worker import IndexerWorker
 from ..engine.indexer_engine import IndexerEngine
 from ..models import DashboardStats, ExtractedDocument
@@ -29,8 +30,8 @@ class MainWindow(QMainWindow):
     def __init__(self, engine: IndexerEngine | None = None):
         super().__init__()
         self.setWindowTitle("Medical Literature Search — Windows Indexer")
-        self.resize(1100, 800)
-        self.setMinimumSize(900, 650)
+        self.resize(1150, 850)
+        self.setMinimumSize(950, 700)
 
         self.engine = engine or IndexerEngine()
         self.worker: IndexerWorker | None = None
@@ -41,11 +42,14 @@ class MainWindow(QMainWindow):
         self._refresh_stats()
 
     def _init_ui(self) -> None:
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(16)
+        self.tabs = QTabWidget(self)
+        self.setCentralWidget(self.tabs)
+
+        # Tab 1: Indexing & Dashboard
+        indexer_tab = QWidget()
+        indexer_layout = QVBoxLayout(indexer_tab)
+        indexer_layout.setContentsMargins(16, 16, 16, 16)
+        indexer_layout.setSpacing(14)
 
         # 1. Header
         header_layout = QHBoxLayout()
@@ -60,11 +64,11 @@ class MainWindow(QMainWindow):
         self.btn_refresh = QPushButton("Refresh Stats")
         self.btn_refresh.clicked.connect(self._refresh_stats)
         header_layout.addWidget(self.btn_refresh)
-        main_layout.addLayout(header_layout)
+        indexer_layout.addLayout(header_layout)
 
         # 2. Dashboard
         self.dashboard = DashboardWidget(self)
-        main_layout.addWidget(self.dashboard)
+        indexer_layout.addWidget(self.dashboard)
 
         # 3. Middle Section: Folders (Left) & Controls/Progress (Right)
         middle_splitter = QSplitter(Qt.Horizontal)
@@ -150,7 +154,7 @@ class MainWindow(QMainWindow):
         control_layout.addStretch()
 
         middle_splitter.addWidget(control_group)
-        main_layout.addWidget(middle_splitter, stretch=2)
+        indexer_layout.addWidget(middle_splitter, stretch=2)
 
         # 4. Activity & Live Log
         log_group = QGroupBox("Activity & Extraction Logs")
@@ -175,7 +179,14 @@ class MainWindow(QMainWindow):
         log_btn_layout.addWidget(self.btn_clear_log)
         log_layout.addLayout(log_btn_layout)
 
-        main_layout.addWidget(log_group, stretch=1)
+        indexer_layout.addWidget(log_group, stretch=1)
+
+        # Tab 2: Full-text Search
+        self.search_tab = SearchTab(self.engine.db, self)
+
+        # Add tabs
+        self.tabs.addTab(indexer_tab, "Indexer & Dashboard")
+        self.tabs.addTab(self.search_tab, "Search Library (FTS5)")
 
         # 5. Status Bar with Dependency Checks
         self.status_bar = QStatusBar()

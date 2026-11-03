@@ -12,7 +12,7 @@ if str(project_root) not in sys.path:
 
 def main() -> None:
     # Check if CLI mode requested or subcommand provided
-    cli_commands = {"scan", "stats", "retry", "clear"}
+    cli_commands = {"scan", "stats", "retry", "clear", "search", "suggest", "synonyms"}
     if "--cli" in sys.argv or (len(sys.argv) > 1 and sys.argv[1] in cli_commands):
         if "--cli" in sys.argv:
             sys.argv.remove("--cli")

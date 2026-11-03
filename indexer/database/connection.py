@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 from ..models import ExtractedDocument, DashboardStats, ExtractionStatus
 from .schema import create_schema
+from ..search.synonyms import seed_default_synonyms
 from ..config import logger, DEFAULT_DB_PATH
 
 
@@ -39,10 +40,11 @@ class DatabaseManager:
         return self._local.conn
 
     def init_db(self) -> None:
-        """Initialize the database schema."""
+        """Initialize the database schema and default seed data."""
         with self._lock:
             conn = self.get_connection()
             create_schema(conn)
+            seed_default_synonyms(conn)
 
     def close(self) -> None:
         """Close connection for current thread."""
@@ -314,3 +316,8 @@ class DatabaseManager:
                 conn.execute("DELETE FROM collections")
                 conn.execute("DELETE FROM documents")
                 conn.execute("VACUUM")
+
+    def get_search_service(self):
+        """Return a SearchService instance bound to current thread connection."""
+        from ..search.search_service import SearchService
+        return SearchService(self.get_connection())

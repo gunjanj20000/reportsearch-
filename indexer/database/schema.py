@@ -69,6 +69,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     paragraph_number UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+
+-- FTS5 Vocabulary table for instant auto-complete and search suggestions
+CREATE VIRTUAL TABLE IF NOT EXISTS search_vocab USING fts5vocab(search_index, 'row');
+
+-- Cardiology and medical synonym dictionary table
+CREATE TABLE IF NOT EXISTS synonyms (
+    synonym_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    term TEXT NOT NULL UNIQUE,
+    expansion TEXT NOT NULL,
+    category TEXT DEFAULT 'cardiology',
+    enabled INTEGER DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_synonyms_term ON synonyms(term);
 """
 
 
