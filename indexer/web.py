@@ -26,6 +26,7 @@ from .config import (
     find_tesseract_binary,
     format_bytes,
     resolve_network_path,
+    is_archive_file,
 )
 from .database.connection import DatabaseManager
 from .engine.indexer_engine import IndexerEngine
@@ -322,11 +323,24 @@ def test_storage_path(path_str: str) -> Dict[str, Any]:
             "error": f"Folder '{clean}' could not be reached or does not exist. Ensure the drive or network share is connected."
         }
 
-    if not p.is_dir():
+    if not p.is_dir() and not is_archive_file(p):
         return {
             "valid": False,
             "resolved_path": resolved,
-            "error": f"'{clean}' is a file, not a directory. Please provide a folder path."
+            "error": f"'{clean}' is not a directory or supported compressed archive (.zip, .tar.gz, etc.)."
+        }
+
+    # If it is a compressed archive
+    if is_archive_file(p):
+        from .scanner.archive_scanner import ArchiveScanner
+        ascanner = ArchiveScanner()
+        docs = ascanner.inspect_and_extract(p)
+        return {
+            "valid": True,
+            "resolved_path": str(p.resolve()),
+            "doc_count_est": len(docs),
+            "sample_files": [Path(d.member_name).name for d in docs[:4]],
+            "is_archive": True
         }
 
     doc_count = 0
@@ -634,11 +648,23 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             subdirs = []
             try:
                 for entry in sorted(os.scandir(target_dir), key=lambda e: e.name.lower()):
-                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                    if entry.name.startswith("."):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
                         try:
                             subdirs.append({
                                 "name": entry.name,
-                                "path": str(Path(entry.path).resolve())
+                                "path": str(Path(entry.path).resolve()),
+                                "is_archive": False
+                            })
+                        except Exception:
+                            continue
+                    elif is_archive_file(entry.name):
+                        try:
+                            subdirs.append({
+                                "name": f"📦 {entry.name}",
+                                "path": str(Path(entry.path).resolve()),
+                                "is_archive": True
                             })
                         except Exception:
                             continue
@@ -745,14 +771,47 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 if paras:
                     page_content = "\n\n".join(p[0] for p in paras if p[0])
 
+            paras_rows = conn.execute(
+                "SELECT paragraph_text FROM document_paragraphs WHERE document_id = ? AND page_number = ? ORDER BY paragraph_number",
+                (doc_id, page_num)
+            ).fetchall()
+            paragraphs = [p[0] for p in paras_rows if p[0]]
+
+            if not page_content and paragraphs:
+                page_content = "\n\n".join(paragraphs)
+
+            is_archive = "#" in source_path
+            archive_name = None
+            member_path = None
+            if is_archive:
+                parts = source_path.split("#", 1)
+                archive_name = Path(parts[0]).name
+                member_path = parts[1]
+
+            doc_title = filename
+            try:
+                title_row = conn.execute(
+                    "SELECT title FROM search_index WHERE document_id = ? AND title IS NOT NULL LIMIT 1",
+                    (doc_id,)
+                ).fetchone()
+                if title_row and title_row[0]:
+                    doc_title = title_row[0]
+            except Exception:
+                pass
+
             self.send_json({
                 "document_id": doc_id,
                 "filename": filename,
+                "doc_title": doc_title,
                 "extension": extension.replace(".", "").upper(),
                 "source_path": source_path,
                 "page_number": page_num,
                 "total_pages": max(page_count or 1, 1),
-                "content": page_content
+                "content": page_content,
+                "paragraphs": paragraphs,
+                "is_archive": is_archive,
+                "archive_name": archive_name,
+                "member_path": member_path
             })
             return
 
@@ -1541,105 +1600,250 @@ SPA_HTML = r"""<!DOCTYPE html>
       color: var(--primary-dark);
     }
 
-    /* Page Note Modal Styling (Small Clinical Note) */
-    .note-box {
-      background: #ffffff;
-      border-radius: 12px;
+    /* ============================================================
+       MINI PAGE OF ORIGINAL VERSION (Authentic Document Sheet)
+       ============================================================ */
+    .mini-page-modal-wrapper {
+      background: #090d16;
+      border-radius: 16px;
       width: 100%;
-      max-width: 820px;
-      max-height: 88vh;
+      max-width: 920px;
+      height: 92vh;
       display: flex;
       flex-direction: column;
-      box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.35);
-      border: 1px solid #cbd5e1;
+      box-shadow: 0 25px 65px -12px rgba(0, 0, 0, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.1);
       overflow: hidden;
-      animation: noteSlideIn 0.18s ease-out;
+      animation: miniPageSlide 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    @keyframes noteSlideIn {
-      from { transform: translateY(-12px) scale(0.98); opacity: 0; }
+    @keyframes miniPageSlide {
+      from { transform: translateY(-16px) scale(0.97); opacity: 0; }
       to { transform: translateY(0) scale(1); opacity: 1; }
     }
-    .note-header {
-      padding: 0.9rem 1.25rem;
-      background: #f8fafc;
-      border-bottom: 1px solid #e2e8f0;
+    .mini-page-topbar {
+      padding: 0.75rem 1.4rem;
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 12px;
+      shrink: 0;
     }
-    .note-header-left {
+    .mini-page-topbar-left {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
+      min-width: 0;
     }
-    .note-icon { font-size: 1.6rem; }
-    .note-title {
-      font-size: 1.05rem;
+    .mini-page-type-badge {
+      background: #0284c7;
+      color: #ffffff;
+      font-size: 0.75rem;
+      font-weight: 800;
+      padding: 3px 8px;
+      border-radius: 6px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .mini-page-title-block { min-width: 0; }
+    .mini-page-main-title {
+      font-size: 0.95rem;
       font-weight: 700;
-      color: #0f172a;
-      word-break: break-all;
+      color: #f8fafc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 380px;
     }
-    .note-subtitle {
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      margin-top: 2px;
+    .mini-page-sub-title {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-top: 1px;
     }
-    .note-header-actions {
+    .mini-page-topbar-actions {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    .note-toolbar {
-      padding: 0.5rem 1.25rem;
-      background: #f1f5f9;
-      border-bottom: 1px solid #e2e8f0;
+    .zoom-pill {
+      display: flex;
+      align-items: center;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 20px;
+      padding: 2px 6px;
+      gap: 4px;
+    }
+    .zoom-btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: color 0.15s;
+    }
+    .zoom-btn:hover { color: #f8fafc; background: #334155; }
+    .zoom-level {
+      font-size: 0.75rem;
+      font-family: monospace;
+      color: #38bdf8;
+      padding: 0 4px;
+    }
+    .mini-page-nav-bar {
+      padding: 0.5rem 1.4rem;
+      background: #0d1322;
+      border-bottom: 1px solid #1e293b;
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 12px;
+      gap: 16px;
+      shrink: 0;
     }
-    .note-page-badge {
+    .stepper-badge {
       font-size: 0.85rem;
       font-weight: 600;
-      background: white;
-      padding: 3px 12px;
-      border-radius: 9999px;
-      border: 1px solid #cbd5e1;
-      color: #1e293b;
+      color: #f1f5f9;
+      background: #1e293b;
+      padding: 4px 14px;
+      border-radius: 12px;
+      border: 1px solid #334155;
     }
-    .note-content-container {
-      padding: 1.5rem;
-      overflow-y: auto;
+
+    /* Workbench dark canvas where the mini sheet floats */
+    .mini-page-workbench {
       flex: 1;
-      max-height: 56vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      font-size: 0.95rem;
-      line-height: 1.7;
-      color: #1e293b;
-      background: #fafaf9; /* clinical paper note tint */
-      white-space: pre-wrap;
-      word-break: break-word;
+      overflow-y: auto;
+      overflow-x: auto;
+      background: #090d16;
+      padding: 2.2rem 1.5rem;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
     }
-    .note-footer {
-      padding: 0.65rem 1.25rem;
-      background: #f8fafc;
-      border-top: 1px solid #e2e8f0;
+
+    /* The authentic paper sheet */
+    .mini-page-sheet {
+      background: #ffffff;
+      color: #1e293b;
+      width: 100%;
+      max-width: 680px;
+      min-height: 840px;
+      padding: 44px 50px;
+      border-radius: 4px;
+      border: 1px solid #cbd5e1;
+      box-shadow: 0 18px 45px -8px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.15s ease-out;
+      transform-origin: top center;
+    }
+
+    /* Running Header */
+    .mini-page-running-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 0.78rem;
-      color: #64748b;
-    }
-    .note-path {
-      font-family: monospace;
-      max-width: 60%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .note-badge-safe {
-      color: #059669;
+      border-bottom: 1.5px solid #0f172a;
+      padding-bottom: 8px;
+      margin-bottom: 24px;
+      font-size: 0.72rem;
+      letter-spacing: 0.05em;
+      color: #475569;
       font-weight: 600;
+    }
+    .running-seal {
+      color: #0284c7;
+      font-weight: 700;
+      margin-right: 12px;
+    }
+    .running-archive-tag {
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      color: #0369a1;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+
+    /* Sheet Body */
+    .mini-page-sheet-body {
+      flex: 1;
+      font-family: Georgia, 'Times New Roman', Charter, Cambria, serif;
+      font-size: 15px;
+      line-height: 1.78;
+      color: #1e293b;
+      word-break: break-word;
+    }
+    .mini-page-para {
+      margin-bottom: 1.15rem;
+      text-align: justify;
+      text-justify: inter-word;
+    }
+    .mini-page-heading {
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 1.08rem;
+      font-weight: 700;
+      color: #090d16;
+      margin-top: 1.4rem;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.01em;
+      border-left: 3px solid #0284c7;
+      padding-left: 8px;
+    }
+
+    /* High contrast clinical highlighter */
+    mark.mini-page-mark,
+    .mini-page-sheet-body mark {
+      background-color: #fef08a;
+      color: #713f12;
+      font-weight: 700;
+      padding: 1px 4px;
+      border-radius: 3px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+
+    /* Running Footer */
+    .mini-page-running-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid #cbd5e1;
+      padding-top: 10px;
+      margin-top: 28px;
+      font-size: 0.72rem;
+      color: #64748b;
+      font-family: monospace;
+    }
+    .footer-center {
+      font-weight: 700;
+      font-size: 0.8rem;
+      color: #0f172a;
+    }
+
+    @media print {
+      body * { visibility: hidden; }
+      #pageNoteModal, #pageNoteModal * { visibility: visible; }
+      #pageNoteModal {
+        position: absolute; left: 0; top: 0; width: 100%; height: auto;
+        background: white !important; display: block !important;
+      }
+      .mini-page-modal-wrapper {
+        border: none !important; box-shadow: none !important;
+        max-width: 100% !important; height: auto !important;
+      }
+      .mini-page-topbar, .mini-page-nav-bar { display: none !important; }
+      .mini-page-workbench { background: white !important; padding: 0 !important; }
+      .mini-page-sheet {
+        border: none !important; box-shadow: none !important;
+        max-width: 100% !important; padding: 0 !important;
+      }
     }
 
     /* Synonyms Table */
@@ -1898,39 +2102,67 @@ SPA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Page Note Modal (Small Note for Exact Page Content) -->
+<!-- Page Note Modal (Authentic Mini Page of Original Version) -->
 <div id="pageNoteModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closePageNote();">
-  <div class="note-box">
-    <div class="note-header">
-      <div class="note-header-left">
-        <span class="note-icon">📝</span>
-        <div>
-          <div class="note-title" id="noteDocTitle">Document Page Note</div>
-          <div class="note-subtitle" id="noteDocMeta">Page 1 of 1</div>
+  <div class="mini-page-modal-wrapper">
+    <!-- Topbar / Controls -->
+    <div class="mini-page-topbar">
+      <div class="mini-page-topbar-left">
+        <span class="mini-page-type-badge" id="miniPageFormatBadge">PDF</span>
+        <div class="mini-page-title-block">
+          <div class="mini-page-main-title" id="miniPageDocTitle">Document Title</div>
+          <div class="mini-page-sub-title" id="miniPageDocMeta">Page 1 of 1</div>
         </div>
       </div>
-      <div class="note-header-actions">
-        <button class="btn btn-sm btn-secondary" onclick="copyNoteContent()" title="Copy text to clipboard">📋 Copy Note</button>
+
+      <!-- Action Tools -->
+      <div class="mini-page-topbar-actions">
+        <div class="zoom-pill">
+          <button class="zoom-btn" onclick="adjustMiniPageZoom(-0.1)" title="Zoom Out (–)">−</button>
+          <span class="zoom-level" id="miniPageZoomText">100%</span>
+          <button class="zoom-btn" onclick="adjustMiniPageZoom(0.1)" title="Zoom In (+)">+</button>
+          <button class="zoom-btn" onclick="resetMiniPageZoom()" title="Reset Zoom (100%)">⟲</button>
+        </div>
+        <button class="btn btn-sm btn-secondary" onclick="printMiniPage()" title="Print / Export Page Sheet">🖨️ Print</button>
+        <button class="btn btn-sm btn-secondary" onclick="copyNoteContent()" title="Copy clean page text">📋 Copy Text</button>
         <button class="modal-close" onclick="closePageNote()" title="Close (Esc)">✕</button>
       </div>
     </div>
 
-    <!-- Page Pagination Toolbar -->
-    <div class="note-toolbar">
-      <button class="btn btn-sm btn-secondary" id="btnPrevPage" onclick="navigateNotePage(-1)">◀ Prev Page</button>
-      <span class="note-page-badge" id="notePageBadge">Page 1 / 1</span>
-      <button class="btn btn-sm btn-secondary" id="btnNextPage" onclick="navigateNotePage(1)">Next Page ▶</button>
+    <!-- Navigation Stepper -->
+    <div class="mini-page-nav-bar">
+      <button class="btn btn-sm btn-secondary" id="btnPrevPage" onclick="navigateNotePage(-1)" title="Previous Page (Left Arrow)">◀ Previous Page</button>
+      <div class="stepper-badge" id="miniPageNumberBadge">Page 1 / 1</div>
+      <button class="btn btn-sm btn-secondary" id="btnNextPage" onclick="navigateNotePage(1)" title="Next Page (Right Arrow)">Next Page ▶</button>
     </div>
 
-    <!-- Note Content Area -->
-    <div class="note-content-container" id="noteContentContainer">
-      <div style="text-align: center; color: var(--text-muted); padding: 3rem;">Loading page content...</div>
-    </div>
+    <!-- Dark Workbench with Centered Authentic Paper Page Sheet -->
+    <div class="mini-page-workbench" id="miniPageWorkbench">
+      <div class="mini-page-sheet" id="miniPageSheet">
+        <!-- Running Header -->
+        <div class="mini-page-running-header">
+          <div class="running-left">
+            <span class="running-seal">🫀 CLINICAL ARCHIVE</span>
+            <span class="running-doc-name" id="runningDocName">DOCUMENT</span>
+          </div>
+          <div class="running-right">
+            <span class="running-archive-tag" id="runningArchiveTag" style="display: none;">📦 ARCHIVE</span>
+            <span class="running-pg-label" id="runningHeaderPage">PAGE 1</span>
+          </div>
+        </div>
 
-    <!-- Note Footer -->
-    <div class="note-footer">
-      <span class="note-path" id="noteFilePath"></span>
-      <span class="note-badge-safe">🔒 Read-only view &bull; 0 bytes indexed</span>
+        <!-- Sheet Body -->
+        <div class="mini-page-sheet-body" id="miniPageSheetBody">
+          <div style="text-align: center; color: #94a3b8; padding: 4rem;">Loading authentic page sheet...</div>
+        </div>
+
+        <!-- Running Footer -->
+        <div class="mini-page-running-footer">
+          <div class="footer-left" id="runningFooterPath">Source Path</div>
+          <div class="footer-center" id="runningFooterPageCounter">— Page 1 of 1 —</div>
+          <div class="footer-right">MEDICAL RECORD</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>

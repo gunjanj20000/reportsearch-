@@ -81,3 +81,42 @@ def test_sha256_streaming():
         h = calculate_sha256(test_file)
         assert len(h) == 64
         assert isinstance(h, str)
+
+
+def test_scanner_reads_compressed_zip_folder():
+    import zipfile
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        zip_path = root / "clinical_trials.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("trial_cto.txt", "Chronic Total Occlusion clinical study report.")
+            zf.writestr("subfolder/guideline_lm.txt", "Left Main revascularization guideline.")
+            zf.writestr("ignore.bin", b"\x00\x01\x02")
+
+        scanner = FileScanner()
+        # Test direct scan of zip archive
+        res = scanner.scan([zip_path])
+        assert res.total_found == 2
+        assert len(res.to_index) == 2
+        assert any("trial_cto.txt" in f.virtual_source_path for f in res.to_index)
+        assert any("guideline_lm.txt" in f.virtual_source_path for f in res.to_index)
+
+
+def test_scanner_reads_nested_compressed_tar_in_folder():
+    import tarfile
+    import io
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        tar_path = root / "reports.tar.gz"
+        with tarfile.open(tar_path, "w:gz") as tf:
+            data = b"TAVR aortic valve replacement registry note."
+            ti = tarfile.TarInfo("tavr_registry.txt")
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+
+        scanner = FileScanner()
+        # Test scan of folder containing compressed tar.gz
+        res = scanner.scan([root])
+        assert res.total_found == 1
+        assert len(res.to_index) == 1
+        assert "tavr_registry.txt" in res.to_index[0].virtual_source_path

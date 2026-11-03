@@ -26,3 +26,6 @@ pwa/node_modules/
 # Include pre-built PWA distribution for zero-dependency serving
 !pwa/dist/
 !pwa/dist/**
+
+# Archive runtime cache
+data/archive_cache/

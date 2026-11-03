@@ -10,17 +10,29 @@ from pathlib import Path
 # Supported document extensions
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt"}
 
+# Supported compressed folder / archive extensions
+ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz"}
+
 # Default application paths
 APP_DIR = Path(os.environ.get("MEDSEARCH_HOME", Path(__file__).resolve().parent.parent))
 DATA_DIR = APP_DIR / "data"
 LOGS_DIR = APP_DIR / "logs"
 EXPORTS_DIR = DATA_DIR / "exports"
+ARCHIVES_CACHE_DIR = DATA_DIR / "archive_cache"
 DEFAULT_DB_PATH = DATA_DIR / "medical_search.db"
 
-# Ensure data and log directories exist
+# Ensure data, log, and archive directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+ARCHIVES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+def is_archive_file(path_or_name: Path | str) -> bool:
+    """Check if file path or name has a recognized compressed folder / archive extension."""
+    s = str(path_or_name).lower()
+    return any(s.endswith(ext) for ext in [
+        ".zip", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar"
+    ])
 
 # OCR Configuration
 DEFAULT_OCR_LANGUAGES = "eng+hin"

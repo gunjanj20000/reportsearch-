@@ -226,3 +226,16 @@ def test_compact_database_download(web_server):
         assert len(data) > 1000
         # Zstandard magic bytes
         assert data[:4] == b"\x28\xb5\x2f\xfd"
+
+
+def test_api_document_mini_page_metadata(web_server):
+    """Test /api/document/page returns enhanced mini page metadata including paragraphs and doc_title."""
+    url = f"{web_server}/api/document/page?doc_id=1&page=1"
+    with urllib.request.urlopen(url) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert "doc_title" in data
+        assert "paragraphs" in data
+        assert "is_archive" in data
+        assert isinstance(data["paragraphs"], list)
+        assert len(data["content"]) > 0

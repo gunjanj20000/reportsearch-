@@ -127,7 +127,7 @@ class IndexerEngine:
                     self._set_status("cancelled")
                     break
 
-                current_filename = item.path.name
+                current_filename = Path(item.archive_member).name if getattr(item, "archive_member", None) else item.path.name
                 if self.on_progress:
                     self.on_progress(
                         idx,
@@ -138,6 +138,10 @@ class IndexerEngine:
 
                 # Extract content
                 doc = self.factory.extract(item.path)
+                if getattr(item, "virtual_source_path", None):
+                    doc.source_path = item.virtual_source_path
+                if getattr(item, "archive_member", None):
+                    doc.filename = Path(item.archive_member).name
 
                 # Persist to database
                 self.db.save_document(doc)
