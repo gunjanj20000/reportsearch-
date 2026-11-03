@@ -1,6 +1,7 @@
 """Tests for indexer.web zero-dependency HTTP server and REST endpoints."""
 
 import json
+import tempfile
 import threading
 import time
 import urllib.request
@@ -285,3 +286,63 @@ def test_api_document_mini_page_metadata(web_server):
         assert "is_archive" in data
         assert isinstance(data["paragraphs"], list)
         assert len(data["content"]) > 0
+
+
+def test_api_indexed_folders(web_server):
+    """Test /api/folders GET, /api/folders/add, /api/scan, and /api/folders/remove endpoints."""
+    # 1. Create a transient folder with a sample text file
+    with tempfile.TemporaryDirectory() as tmp_folder:
+        sample_file = Path(tmp_folder) / "readme.txt"
+        sample_file.write_text("Universal document index test file content.")
+
+        # 2. Add folder via POST /api/folders/add
+        req = urllib.request.Request(
+            f"{web_server}/api/folders/add",
+            data=json.dumps({"path": tmp_folder, "name": "Transient Test Folder"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode("utf-8"))
+            assert data.get("success") is True
+            folder = data.get("folder")
+            assert folder is not None
+            folder_id = folder["folder_id"]
+
+        # 3. GET /api/folders
+        with urllib.request.urlopen(f"{web_server}/api/folders") as resp:
+            assert resp.status == 200
+            d = json.loads(resp.read().decode("utf-8"))
+            assert d.get("total_count", 0) >= 1
+            matching = [f for f in d["folders"] if f["folder_id"] == folder_id]
+            assert len(matching) == 1
+            assert matching[0]["display_name"] == "Transient Test Folder"
+
+        # 4. Trigger scan for this folder via /api/scan
+        req_scan = urllib.request.Request(
+            f"{web_server}/api/scan",
+            data=json.dumps({"folders": [tmp_folder]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req_scan) as resp:
+            assert resp.status == 200
+            scan_data = json.loads(resp.read().decode("utf-8"))
+            assert scan_data.get("success") is True
+
+        time.sleep(0.5)
+
+        # 5. Remove folder via POST /api/folders/remove
+        req_rem = urllib.request.Request(
+            f"{web_server}/api/folders/remove",
+            data=json.dumps({"folder_id": folder_id, "delete_documents": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req_rem) as resp:
+            assert resp.status == 200
+            rem_data = json.loads(resp.read().decode("utf-8"))
+            assert rem_data.get("success") is True
+
+        # Verify removal
+        with urllib.request.urlopen(f"{web_server}/api/folders") as resp:
+            d2 = json.loads(resp.read().decode("utf-8"))
+            assert not any(f["folder_id"] == folder_id for f in d2["folders"])

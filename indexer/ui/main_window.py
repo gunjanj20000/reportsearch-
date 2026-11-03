@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self.selected_folders: List[Path] = []
 
         self._init_ui()
+        self._load_folders()
         self._check_dependencies()
         self._refresh_stats()
 
@@ -228,13 +229,24 @@ class MainWindow(QMainWindow):
         stats = self.engine.db.get_dashboard_stats()
         self.dashboard.update_stats(stats)
 
+    def _load_folders(self) -> None:
+        """Load configured indexed folders from SQLite into UI list."""
+        folders = self.engine.db.get_indexed_folders()
+        self.selected_folders.clear()
+        self.folder_list.clear()
+        for f in folders:
+            p = Path(f["folder_path"])
+            self.selected_folders.append(p)
+            self.folder_list.addItem(f["folder_path"])
+
     def _add_folder(self) -> None:
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Medical Literature Folder")
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Document Folder")
         if dir_path:
             p = Path(dir_path).resolve()
             if p not in self.selected_folders:
                 self.selected_folders.append(p)
                 self.folder_list.addItem(str(p))
+                self.engine.db.add_indexed_folder(str(p))
                 self._log(f"Added folder: {p}")
 
     def _remove_folder(self) -> None:
@@ -242,9 +254,17 @@ class MainWindow(QMainWindow):
         if current_row >= 0:
             removed = self.selected_folders.pop(current_row)
             self.folder_list.takeItem(current_row)
+            folders = self.engine.db.get_indexed_folders()
+            for f in folders:
+                if f["folder_path"] == str(removed):
+                    self.engine.db.remove_indexed_folder(f["folder_id"])
+                    break
             self._log(f"Removed folder: {removed}")
 
     def _clear_folders(self) -> None:
+        folders = self.engine.db.get_indexed_folders()
+        for f in folders:
+            self.engine.db.remove_indexed_folder(f["folder_id"])
         self.selected_folders.clear()
         self.folder_list.clear()
         self._log("Cleared all source folders.")

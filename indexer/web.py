@@ -617,6 +617,12 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             self.send_json({"synonyms": all_syns})
             return
 
+        # 5b. Indexed Folders List API
+        if path == "/api/folders":
+            folders = _state.db.get_indexed_folders()
+            self.send_json({"folders": folders, "total_count": len(folders)})
+            return
+
         # 6. Database Export Size Preview API
         if path == "/api/export/preview":
             prev = _state.export_manager.get_database_size_preview()
@@ -914,9 +920,22 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 return
 
             folders = data.get("folders", [])
+            # If no folders explicitly provided, default to all configured indexed folders
             if not folders:
-                self.send_json({"error": "No folder selected. Please click 'Browse Folder...' to choose a folder or compressed archive to index."}, status=400)
+                stored = _state.db.get_indexed_folders()
+                folders = [f["folder_path"] for f in stored if f.get("status") != "disabled"]
+
+            if not folders:
+                self.send_json({"error": "No folder selected. Please click 'Add Folder to Index...' to choose a folder or compressed archive to index."}, status=400)
                 return
+
+            # Ensure any scanned folders are recorded in indexed_folders table
+            for f in folders:
+                try:
+                    is_arch = is_archive_file(f)
+                    _state.db.add_indexed_folder(f, is_archive=is_arch)
+                except Exception:
+                    pass
 
             def run_scan_worker():
                 _state.is_indexing = True
@@ -930,7 +949,41 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
 
             thread = threading.Thread(target=run_scan_worker, daemon=True)
             thread.start()
-            self.send_json({"success": True, "message": "Indexing started."})
+            self.send_json({"success": True, "message": f"Indexing started for {len(folders)} folder(s).", "folders": folders})
+            return
+
+        # 1b. Add Indexed Folder API
+        if path == "/api/folders/add":
+            folder_path = data.get("path", "").strip()
+            display_name = data.get("name", "").strip() or None
+            if not folder_path:
+                self.send_json({"error": "Folder path is required."}, status=400)
+                return
+
+            resolved_path = resolve_network_path(folder_path)
+            is_arch = is_archive_file(resolved_path)
+            p = Path(resolved_path)
+            if not p.exists() and not str(folder_path).startswith(("\\\\", "//", "smb://")):
+                self.send_json({"error": f"Folder or archive does not exist: {folder_path}"}, status=400)
+                return
+
+            folder = _state.db.add_indexed_folder(resolved_path, display_name=display_name, is_archive=is_arch)
+            self.send_json({"success": True, "folder": folder})
+            return
+
+        # 1c. Remove Indexed Folder API
+        if path == "/api/folders/remove":
+            folder_id = data.get("folder_id")
+            delete_documents = bool(data.get("delete_documents", False))
+            if folder_id is None:
+                self.send_json({"error": "folder_id is required."}, status=400)
+                return
+
+            ok = _state.db.remove_indexed_folder(int(folder_id), delete_documents=delete_documents)
+            if ok:
+                self.send_json({"success": True, "message": "Folder removed."})
+            else:
+                self.send_json({"error": "Folder not found."}, status=404)
             return
 
         # 2. Control Indexing (Pause / Resume / Cancel)
@@ -1210,6 +1263,114 @@ SPA_HTML = r"""<!DOCTYPE html>
       align-items: center;
       margin-top: 14px;
       flex-wrap: wrap;
+    }
+
+    /* Indexed Folders Section */
+    .folders-top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.1rem;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .folders-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .folders-table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 1.25rem;
+      background: #ffffff;
+      box-shadow: var(--shadow-sm);
+    }
+    .folder-item-card {
+      display: flex;
+      align-items: center;
+      padding: 0.9rem 1.15rem;
+      border-bottom: 1px solid #f1f5f9;
+      gap: 14px;
+      transition: background 0.15s;
+    }
+    .folder-item-card:last-child {
+      border-bottom: none;
+    }
+    .folder-item-card:hover {
+      background: #f8fafc;
+    }
+    .folder-icon {
+      font-size: 1.65rem;
+      line-height: 1;
+      width: 38px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .folder-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .folder-title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 3px;
+      flex-wrap: wrap;
+    }
+    .folder-name {
+      font-weight: 700;
+      font-size: 0.96rem;
+      color: #0f172a;
+    }
+    .folder-type-badge {
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .type-badge-local { background: #e0f2fe; color: #0369a1; }
+    .type-badge-device { background: #fef3c7; color: #b45309; }
+    .type-badge-network { background: #dbeafe; color: #1d4ed8; }
+    .type-badge-archive { background: #f3e8ff; color: #7e22ce; }
+    .folder-path-sub {
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #64748b;
+      word-break: break-all;
+    }
+    .folder-stats {
+      text-align: right;
+      margin-right: 8px;
+      flex-shrink: 0;
+    }
+    .folder-doc-count {
+      font-weight: 700;
+      font-size: 0.92rem;
+      color: #0f172a;
+    }
+    .folder-scanned-time {
+      font-size: 0.75rem;
+      color: #94a3b8;
+    }
+    .folder-item-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .empty-folders-box {
+      text-align: center;
+      padding: 2.2rem 1.5rem;
+      color: #64748b;
+      background: #f8fafc;
+      border-radius: 10px;
+      border: 1.5px dashed #cbd5e1;
+      margin-bottom: 1.25rem;
     }
 
     /* Buttons */
@@ -1956,31 +2117,43 @@ SPA_HTML = r"""<!DOCTYPE html>
     <button class="tab-btn" onclick="switchTab('tabExport')">4. Mobile PWA Export</button>
   </div>
 
-  <!-- Tab 1: Indexer (Decluttered, single unified Browse Folder button) -->
+  <!-- Tab 1: Indexer & Document Sources -->
   <div id="tabIndexer" class="tab-content active">
     <div class="card card-centered">
       <div class="card-title-bar">
-        <div class="card-title">Document Source & Indexing</div>
+        <div class="card-title">Indexed Folders & Document Sources</div>
         <span class="status-badge" id="indexerBadge">● Ready</span>
       </div>
 
-      <div class="folder-selection-card">
-        <div class="folder-selection-header">
-          <div class="folder-icon-box" id="displayFolderIcon">📁</div>
-          <div class="folder-meta-box">
-            <span class="folder-label">SOURCE FOLDER TO SCAN:</span>
-            <div id="displayCurrentFolder" class="folder-path-text">
-              No folder selected. Click "Browse Folder..." to choose documents to index.
-            </div>
-          </div>
+      <!-- Action Bar -->
+      <div class="folders-top-bar">
+        <div>
+          <span style="font-size: 0.95rem; font-weight: 600; color: #334155;">Manage folders, drives & archives to index</span>
+          <div style="font-size: 0.8rem; color: var(--text-muted);" id="foldersCountText">0 folders configured</div>
         </div>
-
-        <div class="folder-action-buttons">
-          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnBrowseFolder" title="Browse local folders, attached USB pendrives, external hard drives, or network shares" style="font-size: 1rem; padding: 0.75rem 1.6rem;">
-            <span>📂</span> <strong>Browse Folder...</strong>
+        <div class="folders-actions">
+          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnAddFolder" title="Add a local folder, USB pendrive, external HDD, or network share to the index">
+            <span>➕</span> <strong>Add Folder to Index...</strong>
           </button>
-          <button class="btn btn-success" id="btnStartScan" onclick="startScan()" style="margin-left: auto; font-size: 1rem; padding: 0.75rem 1.8rem;">
-            <span>🚀</span> <strong>Start Indexing</strong>
+          <button class="btn btn-success" id="btnIndexAll" onclick="startScanAll()" title="Scan and index all configured folders">
+            <span>🚀</span> <strong>Index All Folders</strong>
+          </button>
+        </div>
+      </div>
+
+      <!-- Indexed Folders List / Table -->
+      <div id="indexedFoldersContainer">
+        <div class="folders-table-wrap" id="foldersListWrapper" style="display: none;">
+          <div id="foldersList"></div>
+        </div>
+        <div class="empty-folders-box" id="emptyFoldersBox">
+          <div style="font-size: 2.2rem; margin-bottom: 0.5rem;">📁</div>
+          <div style="font-weight: 600; color: #1e293b; margin-bottom: 0.3rem;">No Folders Added to Index Yet</div>
+          <div style="font-size: 0.88rem; max-width: 440px; margin: 0 auto 1.2rem auto;">
+            Add your document folders, connected USB pendrives, external hard drives, or network shares to build your searchable offline archive.
+          </div>
+          <button class="btn btn-primary" onclick="openFolderBrowser()">
+            <span>➕</span> <strong>Add First Folder to Index</strong>
           </button>
         </div>
       </div>
@@ -2002,7 +2175,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         <span id="progressPct">0%</span>
       </div>
 
-      <div class="log-box" id="activityLogs">Indexer ready. Click 'Browse Folder...' to select a local directory, USB pendrive, external hard disk, or network share, then click 'Start Indexing'.</div>
+      <div class="log-box" id="activityLogs">Indexer ready. Click 'Add Folder to Index...' to select folders, drives, or archives, then click 'Index All Folders' or 'Rescan' on any individual folder.</div>
     </div>
   </div>
 
@@ -2156,7 +2329,7 @@ SPA_HTML = r"""<!DOCTYPE html>
       <div style="display: flex; gap: 8px;">
         <button class="btn btn-secondary" onclick="closeFolderBrowser()">Cancel</button>
         <button class="btn btn-primary" onclick="confirmFolderSelection()">
-          ✅ Select This Folder
+          ➕ Add This Folder to Index
         </button>
       </div>
     </div>
@@ -2397,61 +2570,167 @@ SPA_HTML = r"""<!DOCTYPE html>
     }
   }
 
-  function confirmFolderSelection() {
+  async function confirmFolderSelection() {
     if (browserCurrentPath) {
       currentSelectedFolderPath = browserCurrentPath;
-      updateSelectedFolderDisplay();
+      await addFolderApi(browserCurrentPath);
     }
     closeFolderBrowser();
   }
 
-  function updateSelectedFolderDisplay() {
-    const el = document.getElementById('displayCurrentFolder');
-    const iconEl = document.getElementById('displayFolderIcon');
-    if (!el) return;
+  async function addFolderApi(folderPath) {
+    if (!folderPath) return;
+    try {
+      const res = await fetch('/api/folders/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: folderPath })
+      });
+      const d = await res.json();
+      if (d.error) {
+        alert(d.error);
+      } else {
+        await loadIndexedFolders();
+        document.getElementById('activityLogs').textContent = 'Added folder: ' + folderPath + '\nClick "Index All Folders" or "Rescan" to scan documents.';
+      }
+    } catch (e) {
+      alert('Failed to add folder: ' + e.message);
+    }
+  }
 
-    const p = currentSelectedFolderPath || '';
-    const pLower = p.toLowerCase();
+  // --- Indexed Folders Management ---
+  let currentIndexedFolders = [];
 
-    if (!p) {
-      if (iconEl) iconEl.textContent = '📁';
-      el.textContent = 'No folder selected. Click "Browse Folder..." to choose documents to index.';
-    } else if (pLower.endsWith('.zip') || pLower.endsWith('.tar.gz') || pLower.endsWith('.tgz') || pLower.endsWith('.tar')) {
-      if (iconEl) iconEl.textContent = '📦';
-      el.textContent = 'Compressed Archive: ' + p;
-    } else if (pLower.startsWith('\\') || pLower.startsWith('smb://') || pLower.includes('gvfs')) {
-      if (iconEl) iconEl.textContent = '🌐';
-      el.textContent = 'Network Share: ' + p;
-    } else if (pLower.includes('/media/') || pLower.includes('/run/media/') || pLower.includes('usb')) {
-      if (iconEl) iconEl.textContent = '🔌';
-      el.textContent = 'Attached Device: ' + p;
-    } else {
-      if (iconEl) iconEl.textContent = '📁';
-      el.textContent = p;
+  async function loadIndexedFolders() {
+    try {
+      const res = await fetch('/api/folders');
+      const d = await res.json();
+      currentIndexedFolders = d.folders || [];
+      renderIndexedFolders();
+    } catch (e) {
+      console.error('Failed to load indexed folders:', e);
+    }
+  }
+
+  function renderIndexedFolders() {
+    const listWrapper = document.getElementById('foldersListWrapper');
+    const listEl = document.getElementById('foldersList');
+    const emptyBox = document.getElementById('emptyFoldersBox');
+    const countText = document.getElementById('foldersCountText');
+    const btnIndexAll = document.getElementById('btnIndexAll');
+
+    if (!listWrapper || !listEl || !emptyBox) return;
+
+    if (currentIndexedFolders.length === 0) {
+      listWrapper.style.display = 'none';
+      emptyBox.style.display = 'block';
+      if (countText) countText.textContent = '0 folders configured';
+      if (btnIndexAll) btnIndexAll.disabled = true;
+      return;
+    }
+
+    listWrapper.style.display = 'block';
+    emptyBox.style.display = 'none';
+    if (btnIndexAll) btnIndexAll.disabled = false;
+    if (countText) countText.textContent = `${currentIndexedFolders.length} folder${currentIndexedFolders.length === 1 ? '' : 's'} configured`;
+
+    listEl.innerHTML = currentIndexedFolders.map(f => {
+      const p = f.folder_path;
+      const pLower = p.toLowerCase();
+      let icon = '📁';
+      let typeClass = 'type-badge-local';
+      let typeLabel = 'Local';
+
+      if (f.is_archive || pLower.endsWith('.zip') || pLower.endsWith('.tar.gz') || pLower.endsWith('.tgz') || pLower.endsWith('.tar')) {
+        icon = '📦';
+        typeClass = 'type-badge-archive';
+        typeLabel = 'Archive';
+      } else if (pLower.startsWith('\\\\') || pLower.startsWith('//') || pLower.startsWith('smb://') || pLower.includes('gvfs')) {
+        icon = '🌐';
+        typeClass = 'type-badge-network';
+        typeLabel = 'Network';
+      } else if (pLower.includes('/media/') || pLower.includes('/run/media/') || pLower.includes('usb')) {
+        icon = '🔌';
+        typeClass = 'type-badge-device';
+        typeLabel = 'USB / External';
+      }
+
+      const docCount = f.live_doc_count || 0;
+      const docCountLabel = `${docCount.toLocaleString()} doc${docCount === 1 ? '' : 's'}`;
+      const lastScanned = f.last_scanned ? f.last_scanned : 'Never scanned';
+      const safeP = encodeURIComponent(f.folder_path);
+      const safeName = encodeURIComponent(f.display_name || f.folder_path);
+
+      return `
+        <div class="folder-item-card">
+          <div class="folder-icon">${icon}</div>
+          <div class="folder-info">
+            <div class="folder-title-row">
+              <span class="folder-name">${escapeHtml(f.display_name || f.folder_path)}</span>
+              <span class="folder-type-badge ${typeClass}">${typeLabel}</span>
+            </div>
+            <div class="folder-path-sub">${escapeHtml(f.folder_path)}</div>
+          </div>
+          <div class="folder-stats">
+            <div class="folder-doc-count">${docCountLabel}</div>
+            <div class="folder-scanned-time">${escapeHtml(lastScanned)}</div>
+          </div>
+          <div class="folder-item-actions">
+            <button class="btn btn-sm btn-secondary" onclick="startScanFolder(decodeURIComponent('${safeP}'))" title="Rescan this folder">🔄 Rescan</button>
+            <button class="btn btn-sm btn-danger" onclick="removeFolder(${f.folder_id}, decodeURIComponent('${safeName}'))" title="Remove from index">🗑️ Remove</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function removeFolder(folderId, displayName) {
+    const deleteDocs = confirm(`Remove "${displayName}" from indexed folders?\n\nPress OK to also remove its indexed search documents from the database, or Cancel to only remove the folder from the list.`);
+    try {
+      const res = await fetch('/api/folders/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder_id: folderId, delete_documents: deleteDocs })
+      });
+      const d = await res.json();
+      if (d.error) {
+        alert(d.error);
+      } else {
+        await loadIndexedFolders();
+        loadStats();
+      }
+    } catch (e) {
+      alert('Error removing folder: ' + e.message);
     }
   }
 
   // --- Indexer Scan ---
-  async function startScan() {
-    const folder = currentSelectedFolderPath;
-    if (!folder) {
-      alert('Please click "Browse Folder..." to choose a folder or compressed archive first.');
-      return;
-    }
-    const folders = [folder];
+  async function startScanAll() {
+    await triggerScan([]);
+  }
 
-    document.getElementById('activityLogs').textContent = 'Starting indexing scan for: ' + folder;
+  async function startScanFolder(folderPath) {
+    await triggerScan([folderPath]);
+  }
+
+  const startScan = startScanAll;
+
+  async function triggerScan(folders) {
+    const logTarget = folders && folders.length === 1 ? folders[0] : 'all configured folders';
+    document.getElementById('activityLogs').textContent = 'Starting indexing scan for: ' + logTarget;
     document.getElementById('scanControls').style.display = 'flex';
     document.getElementById('indexerBadge').textContent = '● Indexing...';
     document.getElementById('indexerBadge').style.color = '#f59e0b';
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folders })
+      body: JSON.stringify({ folders: folders || [] })
     });
     const d = await res.json();
     if (d.error) {
       alert(d.error);
+      document.getElementById('indexerBadge').textContent = '● Ready';
+      document.getElementById('indexerBadge').style.color = '#38bdf8';
     } else {
       setTimeout(checkProgress, 500);
     }
@@ -2480,6 +2759,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         document.getElementById('indexerBadge').textContent = '● Ready';
         document.getElementById('indexerBadge').style.color = '#38bdf8';
         loadStats();
+        loadIndexedFolders();
       }
     } catch (e) {
       console.error(e);
@@ -2893,7 +3173,7 @@ SPA_HTML = r"""<!DOCTYPE html>
   });
 
   // Initial load
-  updateSelectedFolderDisplay();
+  loadIndexedFolders();
   loadStats();
   setInterval(loadStats, 10000);
 </script>

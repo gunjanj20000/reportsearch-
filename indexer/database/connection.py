@@ -315,6 +315,120 @@ class DatabaseManager:
                 conn.execute("DELETE FROM documents")
             conn.execute("VACUUM")
 
+    def get_indexed_folders(self) -> List[Dict[str, Any]]:
+        """Retrieve all configured folders with live document counts."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            """
+            SELECT 
+                f.folder_id,
+                f.folder_path,
+                f.display_name,
+                f.is_archive,
+                f.added_at,
+                f.last_scanned,
+                f.document_count,
+                f.status,
+                (
+                    SELECT COUNT(*) FROM documents d 
+                    WHERE d.source_path = f.folder_path 
+                       OR d.source_path LIKE f.folder_path || '/%' 
+                       OR d.source_path LIKE f.folder_path || '\\%'
+                       OR d.source_path LIKE f.folder_path || '#%'
+                ) AS live_doc_count
+            FROM indexed_folders f
+            ORDER BY f.folder_id ASC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_indexed_folder(
+        self, folder_path: str, display_name: Optional[str] = None, is_archive: bool = False
+    ) -> Dict[str, Any]:
+        """Add or update an indexed folder source."""
+        clean_path = str(folder_path).strip()
+        if not clean_path.startswith(("\\\\", "//", "smb://")):
+            try:
+                clean_path = str(Path(clean_path).resolve())
+            except Exception:
+                pass
+        name = display_name or Path(clean_path).name or clean_path
+        conn = self.get_connection()
+        with self._lock:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO indexed_folders (folder_path, display_name, is_archive, added_at, status)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'active')
+                    ON CONFLICT(folder_path) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        is_archive = excluded.is_archive,
+                        status = 'active'
+                    """,
+                    (clean_path, name, 1 if is_archive else 0)
+                )
+                row = conn.execute("SELECT * FROM indexed_folders WHERE folder_path = ?", (clean_path,)).fetchone()
+                return dict(row) if row else {}
+
+    def remove_indexed_folder(self, folder_id: int, delete_documents: bool = False) -> bool:
+        """Remove a folder from indexed_folders and optionally purge its indexed documents."""
+        conn = self.get_connection()
+        with self._lock:
+            with conn:
+                folder_row = conn.execute("SELECT folder_path FROM indexed_folders WHERE folder_id = ?", (folder_id,)).fetchone()
+                if not folder_row:
+                    return False
+                folder_path = folder_row["folder_path"]
+                if delete_documents:
+                    doc_rows = conn.execute(
+                        """
+                        SELECT document_id FROM documents 
+                        WHERE source_path = ? 
+                           OR source_path LIKE ? || '/%' 
+                           OR source_path LIKE ? || '\\%'
+                           OR source_path LIKE ? || '#%'
+                        """,
+                        (folder_path, folder_path, folder_path, folder_path)
+                    ).fetchall()
+                    doc_ids = [r["document_id"] for r in doc_rows]
+                    if doc_ids:
+                        id_placeholders = ",".join("?" * len(doc_ids))
+                        conn.execute(f"DELETE FROM search_index WHERE document_id IN ({id_placeholders})", doc_ids)
+                        conn.execute(f"DELETE FROM document_paragraphs WHERE document_id IN ({id_placeholders})", doc_ids)
+                        conn.execute(f"DELETE FROM document_pages WHERE document_id IN ({id_placeholders})", doc_ids)
+                        conn.execute(f"DELETE FROM document_collections WHERE document_id IN ({id_placeholders})", doc_ids)
+                        conn.execute(f"DELETE FROM documents WHERE document_id IN ({id_placeholders})", doc_ids)
+                conn.execute("DELETE FROM indexed_folders WHERE folder_id = ?", (folder_id,))
+                return True
+
+    def update_folder_scan_stats(self, folder_path: str, doc_count: Optional[int] = None) -> None:
+        """Update last_scanned timestamp and document_count for an indexed folder."""
+        clean_path = str(folder_path).strip()
+        conn = self.get_connection()
+        with self._lock:
+            with conn:
+                if doc_count is not None:
+                    conn.execute(
+                        "UPDATE indexed_folders SET last_scanned = CURRENT_TIMESTAMP, document_count = ? WHERE folder_path = ?",
+                        (doc_count, clean_path)
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE indexed_folders SET 
+                            last_scanned = CURRENT_TIMESTAMP,
+                            document_count = (
+                                SELECT COUNT(*) FROM documents d 
+                                WHERE d.source_path = indexed_folders.folder_path 
+                                   OR d.source_path LIKE indexed_folders.folder_path || '/%' 
+                                   OR d.source_path LIKE indexed_folders.folder_path || '\\%'
+                                   OR d.source_path LIKE indexed_folders.folder_path || '#%'
+                            )
+                        WHERE folder_path = ?
+                        """,
+                        (clean_path,)
+                    )
+
     def get_search_service(self):
         """Return a SearchService instance bound to current thread connection."""
         from ..search.search_service import SearchService

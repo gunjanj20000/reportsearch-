@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS synonyms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_synonyms_term ON synonyms(term);
+
+-- Indexed folders management table
+CREATE TABLE IF NOT EXISTS indexed_folders (
+    folder_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_path TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    is_archive INTEGER DEFAULT 0,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_scanned TIMESTAMP,
+    document_count INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'active'
+);
+
+CREATE INDEX IF NOT EXISTS idx_indexed_folders_path ON indexed_folders(folder_path);
 """
 
 

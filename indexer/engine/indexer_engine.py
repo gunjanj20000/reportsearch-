@@ -99,6 +99,11 @@ class IndexerEngine:
             if total_to_index == 0:
                 logger.info("No new or modified files found to index.")
                 self._set_status("completed")
+                for f in folders:
+                    try:
+                        self.db.update_folder_scan_stats(str(Path(f).resolve()) if not str(f).startswith(("\\\\", "//", "smb://")) else str(f))
+                    except Exception:
+                        pass
                 if self.on_progress:
                     self.on_progress(0, 0, "", "All documents are up to date.")
                 if self.on_stats_updated:
@@ -161,6 +166,11 @@ class IndexerEngine:
 
             if not self._cancel_requested.is_set():
                 self._set_status("completed")
+                for f in folders:
+                    try:
+                        self.db.update_folder_scan_stats(str(Path(f).resolve()) if not str(f).startswith(("\\\\", "//", "smb://")) else str(f))
+                    except Exception:
+                        pass
                 if self.on_progress:
                     self.on_progress(total_to_index, total_to_index, "", "Indexing complete.")
 

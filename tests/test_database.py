@@ -146,3 +146,48 @@ def test_delete_document_and_cascades(temp_db):
     assert conn.execute("SELECT COUNT(*) FROM document_pages WHERE document_id = ?", (doc_id,)).fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM search_index WHERE document_id = ?", (doc_id,)).fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM documents WHERE document_id = ?", (doc_id,)).fetchone()[0] == 0
+
+
+def test_indexed_folders_management(temp_db):
+    """Test adding, listing with live document counts, updating stats, and removing indexed folders."""
+    # 1. Add folder
+    folder = temp_db.add_indexed_folder("/data/my_reports", display_name="Clinical Reports", is_archive=False)
+    assert folder["folder_id"] is not None
+    assert folder["display_name"] == "Clinical Reports"
+    folder_id = folder["folder_id"]
+
+    # 2. List folders
+    folders = temp_db.get_indexed_folders()
+    assert len(folders) == 1
+    assert folders[0]["display_name"] == "Clinical Reports"
+    assert folders[0]["live_doc_count"] == 0
+
+    # 3. Save a document inside this folder
+    doc = ExtractedDocument(
+        filename="report1.pdf",
+        extension=".pdf",
+        file_size=2048,
+        modified_time=1700000000.0,
+        sha256="sha_rep1",
+        source_path="/data/my_reports/report1.pdf",
+        page_count=1,
+        pages=[ExtractedPage(page_number=1, text="Report content")],
+        paragraphs=[ExtractedParagraph(page_number=1, paragraph_number=1, text="Report content")]
+    )
+    temp_db.save_document(doc)
+
+    # 4. Check live document count
+    folders_after = temp_db.get_indexed_folders()
+    assert folders_after[0]["live_doc_count"] == 1
+
+    # 5. Update scan stats
+    temp_db.update_folder_scan_stats("/data/my_reports")
+    updated = temp_db.get_indexed_folders()[0]
+    assert updated["last_scanned"] is not None
+    assert updated["document_count"] == 1
+
+    # 6. Remove folder and purge documents
+    res = temp_db.remove_indexed_folder(folder_id, delete_documents=True)
+    assert res is True
+    assert len(temp_db.get_indexed_folders()) == 0
+    assert temp_db.get_document_by_path("/data/my_reports/report1.pdf") is None
