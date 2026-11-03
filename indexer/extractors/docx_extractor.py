@@ -5,11 +5,20 @@ import math
 from pathlib import Path
 from typing import List, Tuple
 
-import docx
-from docx.oxml.text.paragraph import CT_P
-from docx.oxml.table import CT_Tbl
-from docx.text.paragraph import Paragraph
-from docx.table import Table
+try:
+    import docx
+    from docx.oxml.text.paragraph import CT_P
+    from docx.oxml.table import CT_Tbl
+    from docx.text.paragraph import Paragraph
+    from docx.table import Table
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+    docx = None  # type: ignore
+    CT_P = None  # type: ignore
+    CT_Tbl = None  # type: ignore
+    Paragraph = None  # type: ignore
+    Table = None  # type: ignore
 
 from .base import BaseExtractor
 from ..models import ExtractedDocument, ExtractedPage, ExtractedParagraph, ExtractionStatus
@@ -23,6 +32,14 @@ class DocxExtractor(BaseExtractor):
         super().__init__({".docx"})
 
     def extract_content(self, file_path: Path, doc: ExtractedDocument) -> None:
+        if not DOCX_AVAILABLE:
+            doc.extraction_status = ExtractionStatus.ERROR.value
+            doc.error_message = (
+                "python-docx is not installed. Please run: pip install python-docx"
+            )
+            logger.warning(f"Failed to process {file_path}: {doc.error_message}")
+            return
+
         docx_doc = docx.Document(str(file_path))
 
         # 1. Document Title

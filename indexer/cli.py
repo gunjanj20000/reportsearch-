@@ -6,10 +6,9 @@ import sys
 from pathlib import Path
 from typing import List
 
-from .config import logger, DEFAULT_DB_PATH, find_libreoffice_binary, find_tesseract_binary
+from .config import logger, DEFAULT_DB_PATH, find_libreoffice_binary, find_tesseract_binary, format_bytes
 from .database.connection import DatabaseManager
 from .engine.indexer_engine import IndexerEngine
-from .ui.dashboard_widget import format_bytes
 
 
 def print_stats(db_path: Path | str = DEFAULT_DB_PATH) -> None:

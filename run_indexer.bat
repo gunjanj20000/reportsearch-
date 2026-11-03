@@ -28,12 +28,17 @@ if not exist "venv\Scripts\activate.bat" (
         pause
         exit /b 1
     )
-    echo [INFO] Installing required dependencies...
     call venv\Scripts\activate.bat
     python -m pip install --upgrade pip
     pip install -r requirements.txt
 ) else (
     call venv\Scripts\activate.bat
+)
+
+python -c "import docx, pymupdf, zstandard" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo [INFO] Installing missing dependencies...
+    pip install -r requirements.txt
 )
 
 :: 3. Launch App

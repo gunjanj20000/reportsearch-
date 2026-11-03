@@ -1,13 +1,18 @@
 # Medical Literature Search - Windows Indexer & Offline Search System
 # Requirements for Indexer Engine and Desktop Application
 
-PySide6>=6.7.0
-pymupdf>=1.24.0
+# Core document extractors and utilities (essential for indexing and web interface)
 python-docx>=1.1.0
-numpy<2.4.0
-pytesseract>=0.3.10
-Pillow>=10.0.0
+pymupdf>=1.24.0
 zstandard>=0.22.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+numpy<2.4.0
+
+# Desktop GUI (optional if running in Web Dashboard / headless VM mode)
+PySide6>=6.7.0
+
+# Testing and packaging
 pytest>=8.0.0
 google-api-python-client>=2.120.0
 google-auth-httplib2>=0.2.0

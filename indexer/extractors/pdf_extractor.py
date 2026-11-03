@@ -6,17 +6,28 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-import pymupdf
-from PIL import Image
-
-# CPU compatibility guard: pytesseract imports numpy if present, but crashes on older CPUs if numpy raises RuntimeError
 try:
-    import numpy
-except Exception:
-    import sys
-    sys.modules["numpy"] = None
+    import pymupdf
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    pymupdf = None  # type: ignore
+    PYMUPDF_AVAILABLE = False
 
-import pytesseract
+try:
+    from PIL import Image
+    # CPU compatibility guard: pytesseract imports numpy if present, but crashes on older CPUs if numpy raises RuntimeError
+    try:
+        import numpy
+    except Exception:
+        import sys
+        sys.modules["numpy"] = None
+
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    Image = None  # type: ignore
+    pytesseract = None  # type: ignore
+    OCR_AVAILABLE = False
 
 from .base import BaseExtractor
 from ..models import ExtractedDocument, ExtractedPage, ExtractedParagraph, ExtractionStatus
@@ -30,11 +41,22 @@ class PdfExtractor(BaseExtractor):
         super().__init__({".pdf"})
         self.ocr_languages = ocr_languages
         tess_bin = find_tesseract_binary()
-        if tess_bin:
-            pytesseract.pytesseract.tesseract_cmd = tess_bin
-        self.tesseract_available = tess_bin is not None
+        if OCR_AVAILABLE and tess_bin:
+            try:
+                pytesseract.pytesseract.tesseract_cmd = tess_bin
+                self.tesseract_available = True
+            except Exception:
+                self.tesseract_available = False
+        else:
+            self.tesseract_available = False
 
     def extract_content(self, file_path: Path, doc: ExtractedDocument) -> None:
+        if not PYMUPDF_AVAILABLE:
+            doc.extraction_status = ExtractionStatus.ERROR.value
+            doc.error_message = "pymupdf is not installed. Please run: pip install pymupdf"
+            logger.error(f"Error opening {file_path}: {doc.error_message}")
+            return
+
         try:
             pdf = pymupdf.open(str(file_path))
         except Exception as e:

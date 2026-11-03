@@ -134,5 +134,17 @@ def setup_logger(name: str = "indexer", log_file: Path | None = None) -> logging
 
     return logger
 
+def format_bytes(num_bytes: int) -> str:
+    """Format bytes into readable units."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    elif num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    elif num_bytes < 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.2f} MB"
+    else:
+        return f"{num_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
 # Global default logger
 logger = setup_logger("medsearch")

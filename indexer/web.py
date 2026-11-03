@@ -15,14 +15,13 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import logger, DEFAULT_DB_PATH, EXPORTS_DIR, find_libreoffice_binary, find_tesseract_binary
+from .config import logger, DEFAULT_DB_PATH, EXPORTS_DIR, find_libreoffice_binary, find_tesseract_binary, format_bytes
 from .database.connection import DatabaseManager
 from .engine.indexer_engine import IndexerEngine
 from .search.search_service import SearchService, SearchResponse
 from .search.suggestions import SuggestionService
 from .search.synonyms import SynonymManager
 from .export.exporter import ExportManager
-from .ui.dashboard_widget import format_bytes
 
 
 # Global state for web server background tasks

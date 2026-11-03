@@ -13,7 +13,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Callable
 
-import zstandard as zstd
+try:
+    import zstandard as zstd
+    ZSTD_AVAILABLE = True
+except ImportError:
+    zstd = None  # type: ignore
+    ZSTD_AVAILABLE = False
 
 from ..config import logger, DEFAULT_DB_PATH
 from ..database.connection import DatabaseManager
@@ -59,6 +64,8 @@ def compress_file_zstd(
     Compress a file using Zstandard streaming compression.
     Returns (compressed_byte_size, sha256_of_compressed_file).
     """
+    if not ZSTD_AVAILABLE:
+        raise RuntimeError("zstandard is not installed. Please install it via: pip install zstandard")
     cctx = zstd.ZstdCompressor(level=level)
     hasher = hashlib.sha256()
     total_src_size = src_path.stat().st_size
@@ -87,6 +94,8 @@ def decompress_file_zstd(
     chunk_size: int = 1024 * 1024
 ) -> int:
     """Decompress a Zstandard archive back to destination file."""
+    if not ZSTD_AVAILABLE:
+        raise RuntimeError("zstandard is not installed. Please install it via: pip install zstandard")
     dctx = zstd.ZstdDecompressor()
     with open(src_path, "rb") as ifh, open(dest_path, "wb") as ofh:
         with dctx.stream_writer(ofh) as decompressor:

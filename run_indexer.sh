@@ -28,14 +28,35 @@ if [ ! -f "venv/bin/activate" ]; then
     }
     source venv/bin/activate
     echo "[INFO] Installing dependencies from requirements.txt..."
-    pip install --upgrade pip
-    pip install -r requirements.txt
+    pip install --upgrade pip --quiet 2>/dev/null || true
+    if ! pip install -r requirements.txt; then
+        echo "[NOTICE] Full requirements install encountered an issue (e.g. PySide6 on this CPU/OS)."
+        echo "[INFO] Installing core non-GUI dependencies..."
+        pip install "python-docx>=1.1.0" "pymupdf>=1.24.0" "zstandard>=0.22.0" "Pillow>=10.0.0" "pytesseract>=0.3.10" "numpy<2.4.0"
+    fi
 else
     source venv/bin/activate
 fi
 
+# Ensure core dependencies (python-docx, pymupdf, zstandard, etc.) are installed
+PYTHON_CMD="python"
+if ! command -v python &>/dev/null; then
+    PYTHON_CMD="python3"
+fi
+
+if ! $PYTHON_CMD -c "import docx, pymupdf, zstandard, PIL" &>/dev/null; then
+    echo "[INFO] Missing required dependencies in virtual environment."
+    echo "[INFO] Installing required packages..."
+    pip install --upgrade pip --quiet 2>/dev/null || true
+    if ! pip install -r requirements.txt; then
+        echo "[NOTICE] Full requirements install encountered an issue (e.g. PySide6 on this CPU/OS)."
+        echo "[INFO] Installing core non-GUI dependencies..."
+        pip install "python-docx>=1.1.0" "pymupdf>=1.24.0" "zstandard>=0.22.0" "Pillow>=10.0.0" "pytesseract>=0.3.10" "numpy<2.4.0"
+    fi
+fi
+
 # Fix potential NumPy X86_V2 incompatibility on older CPUs / virtual machine processors
-if python3 -c "import numpy" 2>&1 | grep -q "X86_V2"; then
+if $PYTHON_CMD -c "import numpy" 2>&1 | grep -q "X86_V2"; then
     echo "[INFO] Detected NumPy X86_V2 incompatibility with CPU. Installing compatible numpy<2.4.0..."
     pip install "numpy<2.4.0" --quiet
 fi
@@ -76,7 +97,7 @@ fi
 CAN_RUN_QT=false
 if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
     # Test if Qt6 can initialize without CPU abort (SSE4.2 / POPCNT check)
-    if python3 -c "import subprocess, sys; sys.exit(0 if subprocess.run([sys.executable, '-c', 'import PySide6.QtWidgets'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 else 1)" 2>/dev/null; then
+    if $PYTHON_CMD -c "import subprocess, sys; sys.exit(0 if subprocess.run([sys.executable, '-c', 'import PySide6.QtWidgets'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 else 1)" 2>/dev/null; then
         CAN_RUN_QT=true
     fi
 fi

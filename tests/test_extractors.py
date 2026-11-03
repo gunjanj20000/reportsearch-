@@ -131,3 +131,30 @@ def test_corrupted_files_graceful_handling():
         if doc.extraction_status == ExtractionStatus.ERROR.value:
             assert doc.error_message is not None
             assert len(doc.error_message) > 0
+
+
+def test_docx_extractor_fallback_when_dependency_missing(monkeypatch):
+    from indexer.extractors import docx_extractor
+    monkeypatch.setattr(docx_extractor, "DOCX_AVAILABLE", False)
+
+    docx_files = list((CORPUS_DIR / "docx_trials").glob("*.docx"))
+    assert len(docx_files) > 0
+
+    extractor = DocxExtractor()
+    doc = extractor.extract(docx_files[0])
+    assert doc.extraction_status == ExtractionStatus.ERROR.value
+    assert "python-docx" in doc.error_message
+
+
+def test_pdf_extractor_fallback_when_dependency_missing(monkeypatch):
+    from indexer.extractors import pdf_extractor
+    monkeypatch.setattr(pdf_extractor, "PYMUPDF_AVAILABLE", False)
+
+    pdf_files = list((CORPUS_DIR / "pdf_guidelines").glob("*.pdf"))
+    assert len(pdf_files) > 0
+
+    extractor = PdfExtractor()
+    doc = extractor.extract(pdf_files[0])
+    assert doc.extraction_status == ExtractionStatus.ERROR.value
+    assert "pymupdf" in doc.error_message
+

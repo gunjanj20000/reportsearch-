@@ -4,19 +4,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import QWidget, QGridLayout, QLabel, QFrame, QVBoxLayout
 from PySide6.QtCore import Qt
 
+from ..config import format_bytes
 from ..models import DashboardStats
-
-
-def format_bytes(num_bytes: int) -> str:
-    """Format bytes into readable units."""
-    if num_bytes < 1024:
-        return f"{num_bytes} B"
-    elif num_bytes < 1024 * 1024:
-        return f"{num_bytes / 1024:.1f} KB"
-    elif num_bytes < 1024 * 1024 * 1024:
-        return f"{num_bytes / (1024 * 1024):.2f} MB"
-    else:
-        return f"{num_bytes / (1024 * 1024 * 1024):.2f} GB"
 
 
 class StatCard(QFrame):
