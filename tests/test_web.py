@@ -161,6 +161,21 @@ def test_api_document_page_note(web_server):
         assert len(data["content"]) > 0
 
 
+def test_sanitize_table_text():
+    """Test table text deduplication function for legacy duplicated records."""
+    from indexer.web import sanitize_table_text
+    raw = (
+        "[Table]\n"
+        "NAME : | Mr.ARJUN LAL | Mr.ARJUN LAL | AGE : | AGE : | 58Years\n"
+        "OPERATOR: | Dr. Prakash Chandwani / Dr. Divij Khetan | Dr. Prakash Chandwani / Dr. Divij Khetan | Dr. Prakash Chandwani / Dr. Divij Khetan"
+    )
+    cleaned = sanitize_table_text(raw)
+    assert "Mr.ARJUN LAL | Mr.ARJUN LAL" not in cleaned
+    assert "NAME : | Mr.ARJUN LAL | AGE : | 58Years" in cleaned
+    assert "OPERATOR: | Dr. Prakash Chandwani / Dr. Divij Khetan" in cleaned
+    assert cleaned.count("Dr. Prakash Chandwani / Dr. Divij Khetan") == 1
+
+
 def test_api_document_page_invalid(web_server):
     """Test /api/document/page returns 404 for nonexistent document."""
     try:

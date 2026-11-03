@@ -132,6 +132,59 @@ def test_docx_extractor(extractor_fixtures):
     assert len(table_paras) > 0, "Tables should be extracted and preserved"
 
 
+def test_docx_table_merged_cells_deduplication(tmp_path):
+    """Ensure merged cells in DOCX tables are not duplicated across grid columns."""
+    try:
+        import docx
+    except ImportError:
+        pytest.skip("python-docx not installed")
+
+    doc = docx.Document()
+    doc.add_heading("Angiography Report", level=1)
+    table = doc.add_table(rows=2, cols=6)
+
+    # Merged horizontal cells (e.g. name across cols 1-2, age label across cols 3-4)
+    table.cell(0, 0).text = "NAME :"
+    table.cell(0, 1).merge(table.cell(0, 2))
+    table.cell(0, 1).text = "Mr.ARJUN LAL"
+    table.cell(0, 3).merge(table.cell(0, 4))
+    table.cell(0, 3).text = "AGE :"
+    table.cell(0, 5).text = "58Years"
+
+    # Row 1: Doctor operator across 5 columns
+    table.cell(1, 0).text = "OPERATOR:"
+    c1 = table.cell(1, 1)
+    for i in range(2, 6):
+        c1.merge(table.cell(1, i))
+    c1.text = "Dr. Prakash Chandwani / Dr. Divij Khetan"
+
+    test_file = tmp_path / "test_merged_table.docx"
+    doc.save(str(test_file))
+
+    extractor = DocxExtractor()
+    extracted = extractor.extract(test_file)
+
+    assert extracted.extraction_status == ExtractionStatus.INDEXED.value
+    table_paras = [p.text for p in extracted.paragraphs if "[Table]" in p.text]
+    assert len(table_paras) == 1
+    table_text = table_paras[0]
+
+    # Verify no duplicate entries in extracted table lines
+    lines = [l for l in table_text.splitlines() if l != "[Table]"]
+    assert len(lines) == 2
+
+    # Line 0 check: NAME : | Mr.ARJUN LAL | AGE : | 58Years
+    cells_row0 = [c.strip() for c in lines[0].split("|")]
+    assert cells_row0 == ["NAME :", "Mr.ARJUN LAL", "AGE :", "58Years"]
+    assert cells_row0.count("Mr.ARJUN LAL") == 1
+    assert cells_row0.count("AGE :") == 1
+
+    # Line 1 check: OPERATOR: | Dr. Prakash Chandwani / Dr. Divij Khetan (only once, not 5 times!)
+    cells_row1 = [c.strip() for c in lines[1].split("|")]
+    assert cells_row1 == ["OPERATOR:", "Dr. Prakash Chandwani / Dr. Divij Khetan"]
+    assert cells_row1.count("Dr. Prakash Chandwani / Dr. Divij Khetan") == 1
+
+
 def test_native_pdf_extractor(extractor_fixtures):
     if "pdf" not in extractor_fixtures:
         pytest.skip("pymupdf not installed")

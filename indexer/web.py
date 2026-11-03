@@ -377,6 +377,29 @@ def test_storage_path(path_str: str) -> Dict[str, Any]:
     }
 
 
+def sanitize_table_text(text: str) -> str:
+    """Deduplicate adjacent duplicated table cells in pipe-delimited table rows."""
+    if not text or "|" not in text:
+        return text
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            deduped = []
+            for p in parts:
+                if not p:
+                    continue
+                norm = " ".join(p.split())
+                if not deduped or " ".join(deduped[-1].split()) != norm:
+                    deduped.append(p)
+            if deduped:
+                cleaned_lines.append(" | ".join(deduped))
+        else:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
 # Global state for web server background tasks
 class WebState:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
@@ -777,6 +800,10 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
 
             if not page_content and paragraphs:
                 page_content = "\n\n".join(paragraphs)
+
+            if page_content:
+                page_content = sanitize_table_text(page_content)
+            paragraphs = [sanitize_table_text(p) for p in paragraphs if p]
 
             is_archive = "#" in source_path
             archive_name = None
@@ -1791,6 +1818,47 @@ SPA_HTML = r"""<!DOCTYPE html>
       padding-left: 8px;
     }
 
+    /* Structured Clinical Table View */
+    .mini-page-table-wrapper {
+      margin: 1.15rem 0;
+      overflow-x: auto;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #f8fafc;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .mini-page-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      font-family: system-ui, -apple-system, sans-serif;
+      line-height: 1.45;
+    }
+    .mini-page-table tr {
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .mini-page-table tr:last-child {
+      border-bottom: none;
+    }
+    .mini-page-table tr:hover {
+      background: #f1f5f9;
+    }
+    .mini-page-table td {
+      padding: 7px 11px;
+      vertical-align: top;
+      color: #1e293b;
+      border-right: 1px solid #e2e8f0;
+    }
+    .mini-page-table td:last-child {
+      border-right: none;
+    }
+    .mini-page-table td:first-child {
+      font-weight: 600;
+      color: #0f172a;
+      white-space: nowrap;
+      background: rgba(241, 245, 249, 0.6);
+    }
+
     /* High contrast clinical highlighter */
     mark.mini-page-mark,
     .mini-page-sheet-body mark {
@@ -2502,7 +2570,30 @@ SPA_HTML = r"""<!DOCTYPE html>
     `).join('');
   }
 
-  // --- Page Note Implementation ---
+  // --- Authentic Mini Page Note View Implementation ---
+  let miniPageZoomLevel = 1.0;
+
+  function adjustMiniPageZoom(delta) {
+    miniPageZoomLevel = Math.min(1.8, Math.max(0.6, Math.round((miniPageZoomLevel + delta) * 10) / 10));
+    applyMiniPageZoom();
+  }
+
+  function resetMiniPageZoom() {
+    miniPageZoomLevel = 1.0;
+    applyMiniPageZoom();
+  }
+
+  function applyMiniPageZoom() {
+    const sheet = document.getElementById('miniPageSheet');
+    const zoomText = document.getElementById('miniPageZoomText');
+    if (sheet) sheet.style.transform = `scale(${miniPageZoomLevel})`;
+    if (zoomText) zoomText.textContent = `${Math.round(miniPageZoomLevel * 100)}%`;
+  }
+
+  function printMiniPage() {
+    window.print();
+  }
+
   async function openPageNote(docId, pageNumber, query) {
     currentNoteDocId = docId;
     currentNotePage = pageNumber || 1;
@@ -2519,9 +2610,86 @@ SPA_HTML = r"""<!DOCTYPE html>
     if (modal) modal.style.display = 'none';
   }
 
+  function highlightMatches(text, query) {
+    if (!text) return '';
+    let safe = escapeHtml(text);
+    if (!query) return safe;
+    const terms = query
+      .replace(/[+\-*()"]/g, ' ')
+      .split(/\s+/)
+      .filter(t => t.length > 2);
+
+    for (const term of terms) {
+      try {
+        const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(`(${escapedTerm})`, 'gi');
+        safe = safe.replace(regex, '<mark class="mini-page-mark">$1</mark>');
+      } catch (e) {}
+    }
+    return safe;
+  }
+
+  function renderSheetContent(rawContent, query) {
+    if (!rawContent || !rawContent.trim()) {
+      return '<div style="color: #94a3b8; text-align: center; padding: 4rem; font-style: italic;">(This page contains no extractable text or is a blank / graphic-only page)</div>';
+    }
+
+    const blocks = rawContent.split(/\n\s*\n/);
+    let html = '';
+
+    for (const block of blocks) {
+      const clean = block.trim();
+      if (!clean) continue;
+
+      const lines = clean.split('\n').map(l => l.trim()).filter(Boolean);
+      const isTable = clean.startsWith('[Table]') || lines.some(l => l.includes('|'));
+
+      if (isTable) {
+        // Strip [Table] label and render as structured table
+        const rowLines = lines.filter(l => l !== '[Table]');
+        html += '<div class="mini-page-table-wrapper"><table class="mini-page-table"><tbody>';
+        for (const rowLine of rowLines) {
+          const cells = rowLine.split('|').map(c => c.trim()).filter(Boolean);
+          // Deduplicate consecutive identical cells
+          const deduped = [];
+          for (const c of cells) {
+            const norm = c.replace(/\s+/g, ' ');
+            if (deduped.length === 0 || deduped[deduped.length - 1].replace(/\s+/g, ' ') !== norm) {
+              deduped.push(c);
+            }
+          }
+          if (deduped.length === 0) continue;
+          html += '<tr>';
+          for (let i = 0; i < deduped.length; i++) {
+            const isLabel = (i === 0 && (deduped[i].endsWith(':') || deduped.length > 1));
+            const tdStyle = isLabel ? 'font-weight: 600; color: #0f172a; white-space: nowrap;' : '';
+            html += `<td style="${tdStyle}">${highlightMatches(deduped[i], query)}</td>`;
+          }
+          html += '</tr>';
+        }
+        html += '</tbody></table></div>';
+      } else {
+        const isHeading = clean.length < 90 && (
+          /^(?:[0-9]+[.)]|table|figure|section|abstract|introduction|methods|results|discussion|conclusion|references|guideline|background)/i.test(clean) ||
+          (clean === clean.toUpperCase() && clean.length > 4)
+        );
+
+        if (isHeading) {
+          html += `<div class="mini-page-heading">${highlightMatches(clean, query)}</div>`;
+        } else {
+          html += `<div class="mini-page-para">${highlightMatches(clean, query)}</div>`;
+        }
+      }
+    }
+
+    return html;
+  }
+
   async function loadNotePage(docId, pageNum) {
-    const container = document.getElementById('noteContentContainer');
-    container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 3rem;">Loading page content...</div>';
+    const container = document.getElementById('miniPageSheetBody');
+    if (container) {
+      container.innerHTML = '<div style="text-align: center; color: #94a3b8; padding: 4rem;">Loading authentic page sheet...</div>';
+    }
 
     try {
       const res = await fetch(`/api/document/page?doc_id=${docId}&page=${pageNum}`);
@@ -2531,40 +2699,59 @@ SPA_HTML = r"""<!DOCTYPE html>
       currentNotePage = data.page_number;
       currentNoteTotalPages = data.total_pages;
 
-      document.getElementById('noteDocTitle').textContent = data.filename;
-      document.getElementById('noteDocMeta').textContent = `${data.extension} Document &bull; Page ${data.page_number} of ${data.total_pages}`;
-      document.getElementById('notePageBadge').textContent = `Page ${data.page_number} / ${data.total_pages}`;
-      document.getElementById('noteFilePath').textContent = data.source_path || data.filename;
+      // Update Topbar and Running Headers
+      const formatBadge = document.getElementById('miniPageFormatBadge');
+      if (formatBadge) formatBadge.textContent = data.extension || 'DOC';
 
-      document.getElementById('btnPrevPage').disabled = (currentNotePage <= 1);
-      document.getElementById('btnNextPage').disabled = (currentNotePage >= currentNoteTotalPages);
-      document.getElementById('btnPrevPage').style.opacity = (currentNotePage <= 1) ? '0.4' : '1';
-      document.getElementById('btnNextPage').style.opacity = (currentNotePage >= currentNoteTotalPages) ? '0.4' : '1';
+      const docTitle = document.getElementById('miniPageDocTitle');
+      if (docTitle) docTitle.textContent = data.doc_title || data.filename;
 
-      if (!data.content || data.content.trim().length === 0) {
-        container.innerHTML = '<div style="color: #94a3b8; text-align: center; padding: 3rem;">(This page contains no text or is an empty/image page without text)</div>';
-        return;
-      }
+      const docMeta = document.getElementById('miniPageDocMeta');
+      if (docMeta) docMeta.textContent = `${data.extension} Document • Page ${data.page_number} of ${data.total_pages}`;
 
-      let safeText = escapeHtml(data.content);
-      if (currentSearchQuery) {
-        const terms = currentSearchQuery
-          .replace(/[+\-*()"]/g, ' ')
-          .split(/\s+/)
-          .filter(t => t.length > 2);
+      const runningDoc = document.getElementById('runningDocName');
+      if (runningDoc) runningDoc.textContent = (data.doc_title || data.filename).toUpperCase();
 
-        for (const term of terms) {
-          try {
-            const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`(${escapedTerm})`, 'gi');
-            safeText = safeText.replace(regex, '<mark>$1</mark>');
-          } catch (e) {}
+      const runningArchive = document.getElementById('runningArchiveTag');
+      if (runningArchive) {
+        if (data.is_archive) {
+          runningArchive.style.display = 'inline-block';
+          runningArchive.textContent = `📦 ${data.archive_name || 'ARCHIVE'}`;
+        } else {
+          runningArchive.style.display = 'none';
         }
       }
 
-      container.innerHTML = safeText;
+      const runningHeaderPage = document.getElementById('runningHeaderPage');
+      if (runningHeaderPage) runningHeaderPage.textContent = `PAGE ${data.page_number}`;
+
+      const stepperBadge = document.getElementById('miniPageNumberBadge');
+      if (stepperBadge) stepperBadge.textContent = `Page ${data.page_number} / ${data.total_pages}`;
+
+      const footerPath = document.getElementById('runningFooterPath');
+      if (footerPath) footerPath.textContent = data.source_path || data.filename;
+
+      const footerCounter = document.getElementById('runningFooterPageCounter');
+      if (footerCounter) footerCounter.textContent = `— Page ${data.page_number} of ${data.total_pages} —`;
+
+      const btnPrev = document.getElementById('btnPrevPage');
+      const btnNext = document.getElementById('btnNextPage');
+      if (btnPrev) {
+        btnPrev.disabled = (currentNotePage <= 1);
+        btnPrev.style.opacity = (currentNotePage <= 1) ? '0.4' : '1';
+      }
+      if (btnNext) {
+        btnNext.disabled = (currentNotePage >= currentNoteTotalPages);
+        btnNext.style.opacity = (currentNotePage >= currentNoteTotalPages) ? '0.4' : '1';
+      }
+
+      if (container) {
+        container.innerHTML = renderSheetContent(data.content, currentSearchQuery);
+      }
     } catch (e) {
-      container.innerHTML = `<div style="color: var(--accent-red); padding: 2.5rem; text-align: center;">Error loading note: ${escapeHtml(e.message)}</div>`;
+      if (container) {
+        container.innerHTML = `<div style="color: var(--accent-red); padding: 2.5rem; text-align: center;">Error loading note: ${escapeHtml(e.message)}</div>`;
+      }
     }
   }
 
@@ -2576,7 +2763,7 @@ SPA_HTML = r"""<!DOCTYPE html>
   }
 
   function copyNoteContent() {
-    const container = document.getElementById('noteContentContainer');
+    const container = document.getElementById('miniPageSheetBody');
     if (!container) return;
     const text = container.innerText || container.textContent;
     navigator.clipboard.writeText(text).then(() => {
@@ -2585,6 +2772,15 @@ SPA_HTML = r"""<!DOCTYPE html>
       alert('Could not copy automatically. You can manually select and copy the text.');
     });
   }
+
+  // Keyboard navigation for Mini Page Modal (Arrow keys to flip pages, Esc to close)
+  document.addEventListener('keydown', (e) => {
+    const modal = document.getElementById('pageNoteModal');
+    if (!modal || modal.style.display === 'none') return;
+    if (e.key === 'Escape') closePageNote();
+    else if (e.key === 'ArrowLeft') navigateNotePage(-1);
+    else if (e.key === 'ArrowRight') navigateNotePage(1);
+  });
 
   // --- Synonyms Tab ---
   async function loadSynonyms() {

@@ -10,7 +10,7 @@ try:
     from docx.oxml.text.paragraph import CT_P
     from docx.oxml.table import CT_Tbl
     from docx.text.paragraph import Paragraph
-    from docx.table import Table
+    from docx.table import Table, _Cell
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
@@ -19,6 +19,7 @@ except ImportError:
     CT_Tbl = None  # type: ignore
     Paragraph = None  # type: ignore
     Table = None  # type: ignore
+    _Cell = None  # type: ignore
 
 from .base import BaseExtractor
 from ..models import ExtractedDocument, ExtractedPage, ExtractedParagraph, ExtractionStatus
@@ -88,10 +89,49 @@ class DocxExtractor(BaseExtractor):
                 table = Table(child, docx_doc)
                 table_lines = []
                 for row in table.rows:
-                    row_cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
-                    row_str = " | ".join(c for c in row_cells if c)
-                    if row_str:
-                        table_lines.append(row_str)
+                    row_cells: List[str] = []
+                    seen_tc_in_row = set()
+
+                    # Direct XML <w:tc> iteration avoids python-docx's gridSpan cell duplication
+                    tc_elements = getattr(getattr(row, "_tr", None), "tc_lst", None)
+                    if tc_elements is not None:
+                        for tc in tc_elements:
+                            # Skip vertical merge continuation cells (which repeat content from prior rows)
+                            if getattr(tc, "vMerge", None) == "continue":
+                                continue
+                            if id(tc) in seen_tc_in_row:
+                                continue
+                            seen_tc_in_row.add(id(tc))
+
+                            try:
+                                cell = _Cell(tc, table)
+                                txt = cell.text.strip().replace("\n", " ")
+                            except Exception:
+                                txt = " ".join("".join(tc.itertext()).split())
+
+                            if txt:
+                                norm = " ".join(txt.split())
+                                # Deduplicate adjacent identical cells in this row
+                                if not row_cells or " ".join(row_cells[-1].split()) != norm:
+                                    row_cells.append(txt)
+                    else:
+                        for cell in row.cells:
+                            tc_elem = getattr(cell, "_tc", None)
+                            if tc_elem is not None:
+                                if id(tc_elem) in seen_tc_in_row:
+                                    continue
+                                seen_tc_in_row.add(id(tc_elem))
+                                if getattr(tc_elem, "vMerge", None) == "continue":
+                                    continue
+                            txt = cell.text.strip().replace("\n", " ")
+                            if txt:
+                                norm = " ".join(txt.split())
+                                if not row_cells or " ".join(row_cells[-1].split()) != norm:
+                                    row_cells.append(txt)
+
+                    if row_cells:
+                        table_lines.append(" | ".join(row_cells))
+
                 if table_lines:
                     raw_items.append("[Table]\n" + "\n".join(table_lines))
 

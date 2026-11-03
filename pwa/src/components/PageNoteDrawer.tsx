@@ -24,7 +24,25 @@ export const PageNoteDrawer: React.FC<PageNoteDrawerProps> = ({
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(data.content);
+      const cleaned = data.content
+        .split('\n')
+        .map((l) => {
+          if (l.trim() === '[Table]') return '';
+          if (!l.includes('|')) return l;
+          const rawCells = l.split('|').map((c) => c.trim()).filter(Boolean);
+          const deduped: string[] = [];
+          for (const c of rawCells) {
+            const norm = c.replace(/\s+/g, ' ');
+            if (deduped.length === 0 || deduped[deduped.length - 1].replace(/\s+/g, ' ') !== norm) {
+              deduped.push(c);
+            }
+          }
+          return deduped.join(' | ');
+        })
+        .filter(Boolean)
+        .join('\n');
+
+      await navigator.clipboard.writeText(cleaned || data.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -85,6 +103,52 @@ export const PageNoteDrawer: React.FC<PageNoteDrawerProps> = ({
         {paragraphs.map((p, idx) => {
           const clean = p.trim();
           if (!clean) return null;
+
+          const lines = clean.split('\n').map((l) => l.trim()).filter(Boolean);
+          const isTable = clean.startsWith('[Table]') || lines.some((l) => l.includes('|'));
+
+          if (isTable) {
+            const rowLines = lines.filter((l) => l !== '[Table]');
+            return (
+              <div key={idx} className="my-3 overflow-x-auto rounded-lg border border-slate-300 bg-slate-50/70 shadow-2xs">
+                <table className="w-full text-left text-xs sm:text-sm border-collapse">
+                  <tbody>
+                    {rowLines.map((line, rIdx) => {
+                      const rawCells = line.split('|').map((c) => c.trim()).filter(Boolean);
+                      const deduped: string[] = [];
+                      for (const c of rawCells) {
+                        const norm = c.replace(/\s+/g, ' ');
+                        if (deduped.length === 0 || deduped[deduped.length - 1].replace(/\s+/g, ' ') !== norm) {
+                          deduped.push(c);
+                        }
+                      }
+                      if (deduped.length === 0) return null;
+                      return (
+                        <tr
+                          key={rIdx}
+                          className="border-b border-slate-200 last:border-b-0 hover:bg-white transition-colors"
+                        >
+                          {deduped.map((c, cIdx) => {
+                            const isLabel = cIdx === 0 && (c.endsWith(':') || deduped.length > 1);
+                            return (
+                              <td
+                                key={cIdx}
+                                className={`p-2 sm:p-2.5 align-top text-slate-800 border-r border-slate-200 last:border-r-0 ${
+                                  isLabel ? 'font-semibold text-slate-900 bg-slate-100/70 whitespace-nowrap' : ''
+                                }`}
+                              >
+                                {highlightText(c)}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
 
           const isHeading =
             clean.length < 85 &&
