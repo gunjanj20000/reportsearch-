@@ -90,3 +90,30 @@ def test_api_export_preview(web_server):
         data = json.loads(resp.read().decode("utf-8"))
         assert "actual_db_size" in data
         assert "estimated_zstd_size" in data
+
+
+def test_api_fs_browse(web_server):
+    """Test /api/fs/browse returns directory listing and shortcuts."""
+    with urllib.request.urlopen(f"{web_server}/api/fs/browse") as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert "current_path" in data
+        assert "breadcrumbs" in data
+        assert "shortcuts" in data
+        assert "subdirectories" in data
+        assert isinstance(data["breadcrumbs"], list)
+        assert isinstance(data["shortcuts"], list)
+        assert isinstance(data["subdirectories"], list)
+
+
+def test_api_fs_native_dialog(web_server):
+    """Test /api/fs/native_dialog responds with supported status."""
+    req = urllib.request.Request(
+        f"{web_server}/api/fs/native_dialog",
+        data=json.dumps({"initial_dir": ""}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert "supported" in data

@@ -7,13 +7,15 @@ Works in any browser without requiring PySide6/Qt or GUI libraries.
 from __future__ import annotations
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import logger, DEFAULT_DB_PATH, EXPORTS_DIR, find_libreoffice_binary, find_tesseract_binary, format_bytes
 from .database.connection import DatabaseManager
@@ -22,6 +24,98 @@ from .search.search_service import SearchService, SearchResponse
 from .search.suggestions import SuggestionService
 from .search.synonyms import SynonymManager
 from .export.exporter import ExportManager
+
+
+def open_native_folder_dialog(initial_dir: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Attempts to open a native OS folder dialog using system tools:
+    - Linux: Zenity / KDialog / Tkinter
+    - Windows: PowerShell FolderBrowserDialog / Tkinter
+    - macOS: AppleScript osascript / Tkinter
+    Returns (supported, selected_path, error_message).
+    """
+    if not initial_dir or not os.path.isdir(initial_dir):
+        initial_dir = str(Path.home())
+
+    # 1. Linux / Unix
+    if sys.platform.startswith("linux") or "bsd" in sys.platform:
+        zenity = shutil.which("zenity")
+        if zenity and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            try:
+                res = subprocess.run(
+                    [zenity, "--file-selection", "--directory", "--title=Select Folder to Index", f"--filename={initial_dir}/"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    return True, res.stdout.strip(), None
+                return True, None, "Selection cancelled"
+            except Exception as e:
+                logger.warning(f"Zenity execution failed: {e}")
+
+        kdialog = shutil.which("kdialog")
+        if kdialog and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            try:
+                res = subprocess.run(
+                    [kdialog, "--getexistingdirectory", initial_dir, "--title", "Select Folder to Index"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    return True, res.stdout.strip(), None
+                return True, None, "Selection cancelled"
+            except Exception as e:
+                logger.warning(f"KDialog execution failed: {e}")
+
+    # 2. Windows
+    elif sys.platform == "win32":
+        ps_cmd = (
+            f"[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; "
+            f"$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            f"$f.Description = 'Select Folder to Index'; "
+            f"$f.SelectedPath = '{initial_dir}'; "
+            f"if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Host $f.SelectedPath }}"
+        )
+        try:
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return True, res.stdout.strip(), None
+            return True, None, "Selection cancelled"
+        except Exception as e:
+            logger.warning(f"PowerShell FolderBrowserDialog failed: {e}")
+
+    # 3. macOS
+    elif sys.platform == "darwin":
+        osa_cmd = f'POSIX path of (choose folder with prompt "Select Folder to Index:" default location "{initial_dir}")'
+        try:
+            res = subprocess.run(
+                ["osascript", "-e", osa_cmd],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return True, res.stdout.strip(), None
+            return True, None, "Selection cancelled"
+        except Exception as e:
+            logger.warning(f"AppleScript dialog failed: {e}")
+
+    # 4. Tkinter fallback if graphical display is available
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY") or sys.platform in ("win32", "darwin"):
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected = filedialog.askdirectory(initialdir=initial_dir, title="Select Folder to Index")
+            root.destroy()
+            if selected:
+                return True, selected, None
+            return True, None, "Selection cancelled"
+        except Exception:
+            pass
+
+    return False, None, "Native OS file dialog not supported on this host environment without desktop display."
 
 
 # Global state for web server background tasks
@@ -250,7 +344,77 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 self.send_error(404, "Export file not found.")
                 return
 
-        # 8. Serve Embedded Modern Web App HTML
+        # 8. Filesystem Browse API
+        if path == "/api/fs/browse":
+            req_dir = params.get("path", [""])[0].strip()
+            if not req_dir:
+                target_dir = Path.home().resolve()
+            else:
+                target_dir = Path(req_dir).resolve()
+
+            if not target_dir.exists() or not target_dir.is_dir():
+                target_dir = Path.home().resolve()
+
+            subdirs = []
+            try:
+                for entry in sorted(os.scandir(target_dir), key=lambda e: e.name.lower()):
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                        try:
+                            subdirs.append({
+                                "name": entry.name,
+                                "path": str(Path(entry.path).resolve())
+                            })
+                        except Exception:
+                            continue
+            except (PermissionError, OSError) as e:
+                logger.warning(f"Cannot read directory {target_dir}: {e}")
+
+            # Breadcrumbs
+            breadcrumbs = []
+            curr = target_dir
+            while curr != curr.parent:
+                breadcrumbs.append({"name": curr.name or str(curr), "path": str(curr)})
+                curr = curr.parent
+            breadcrumbs.append({"name": str(curr), "path": str(curr)})
+            breadcrumbs.reverse()
+
+            # Helpful shortcuts
+            home = Path.home().resolve()
+            raw_shortcuts = [
+                {"name": "🏠 Home (~)", "path": str(home)},
+                {"name": "📄 Documents", "path": str(home / "Documents")},
+                {"name": "📥 Downloads", "path": str(home / "Downloads")},
+                {"name": "🖥️ Desktop", "path": str(home / "Desktop")},
+            ]
+            corpus = Path(__file__).resolve().parent.parent / "sample_corpus"
+            if corpus.exists():
+                raw_shortcuts.append({"name": "📚 Sample Corpus", "path": str(corpus.resolve())})
+
+            if sys.platform != "win32":
+                raw_shortcuts.append({"name": "💾 Root (/)", "path": "/"})
+                if Path("/media").exists():
+                    raw_shortcuts.append({"name": "🔌 /media", "path": "/media"})
+                if Path("/mnt").exists():
+                    raw_shortcuts.append({"name": "🔌 /mnt", "path": "/mnt"})
+            else:
+                import string
+                for letter in string.ascii_uppercase:
+                    dp = letter + ":\\"
+                    if os.path.exists(dp):
+                        raw_shortcuts.append({"name": f"💾 Drive {letter}:", "path": dp})
+
+            valid_shortcuts = [s for s in raw_shortcuts if os.path.isdir(s["path"])]
+
+            self.send_json({
+                "current_path": str(target_dir),
+                "parent_path": str(target_dir.parent) if target_dir.parent != target_dir else None,
+                "breadcrumbs": breadcrumbs,
+                "shortcuts": valid_shortcuts,
+                "subdirectories": subdirs
+            })
+            return
+
+        # 9. Serve Embedded Modern Web App HTML
         if path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -393,6 +557,17 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(e)}, status=500)
             return
 
+        # 6. Native OS Folder Dialog API
+        if path == "/api/fs/native_dialog":
+            initial_dir = data.get("initial_dir", "")
+            supported, selected_path, err_msg = open_native_folder_dialog(initial_dir)
+            self.send_json({
+                "supported": supported,
+                "path": selected_path,
+                "error": err_msg
+            })
+            return
+
         self.send_error(404, "Not Found")
 
 
@@ -480,6 +655,203 @@ SPA_HTML = """<!DOCTYPE html>
     table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
     th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); }
     th { background: #f1f5f9; font-weight: 600; color: var(--text-muted); }
+    /* Folder Manager & Chips */
+    .folder-list-container {
+      background: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 10px;
+      min-height: 48px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 6px;
+      margin-bottom: 10px;
+    }
+    .folder-chip {
+      background: white;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 6px 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.88rem;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .folder-chip-path {
+      font-family: monospace;
+      font-size: 0.85rem;
+      color: #1e293b;
+      word-break: break-all;
+    }
+    .chip-remove {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 1rem;
+      line-height: 1;
+      padding: 0 2px;
+      border-radius: 4px;
+    }
+    .chip-remove:hover {
+      color: var(--accent-red);
+      background: #fee2e2;
+    }
+    .folder-actions-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .folder-input-wrapper {
+      display: flex;
+      gap: 8px;
+      flex: 1;
+      min-width: 280px;
+    }
+
+    /* Modal Dialog */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(15, 23, 42, 0.65);
+      backdrop-filter: blur(2px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 1rem;
+    }
+    .modal-box {
+      background: white;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 760px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #f8fafc;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 1.25rem;
+      cursor: pointer;
+      color: var(--text-muted);
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    .modal-close:hover {
+      background: #e2e8f0;
+      color: var(--text);
+    }
+    .fb-shortcuts {
+      padding: 0.6rem 1.25rem;
+      background: #ffffff;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .fb-shortcut-pill {
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 9999px;
+      padding: 4px 10px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      color: #334155;
+      transition: all 0.15s;
+    }
+    .fb-shortcut-pill:hover {
+      background: #e0f2fe;
+      color: #0369a1;
+      border-color: #7dd3fc;
+    }
+    .fb-nav-bar {
+      padding: 0.6rem 1.25rem;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .fb-breadcrumbs {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      align-items: center;
+      font-size: 0.85rem;
+      overflow-x: auto;
+    }
+    .fb-breadcrumb-item {
+      color: var(--primary);
+      font-weight: 600;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    .fb-breadcrumb-item:hover {
+      text-decoration: underline;
+      background: #e0f2fe;
+    }
+    .fb-list-container {
+      padding: 0.75rem 1.25rem;
+      overflow-y: auto;
+      flex: 1;
+      max-height: 380px;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 6px;
+      align-content: start;
+    }
+    .fb-dir-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+      user-select: none;
+      font-size: 0.9rem;
+    }
+    .fb-dir-item:hover {
+      background: #f1f5f9;
+      border-color: #cbd5e1;
+    }
+    .fb-dir-item.selected {
+      background: #e0f2fe;
+      border-color: #38bdf8;
+      color: #0369a1;
+      font-weight: 600;
+    }
+    .modal-footer {
+      padding: 1rem 1.25rem;
+      border-top: 1px solid var(--border);
+      background: #f8fafc;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
   </style>
 </head>
 <body>
@@ -527,16 +899,37 @@ SPA_HTML = """<!DOCTYPE html>
     <div class="card">
       <div class="card-title">Document Folders & Scan Controls</div>
       <div class="form-group">
-        <label>Folder Paths (click Index Sample Corpus or enter path):</label>
-        <input type="text" id="folderInput" placeholder="sample_corpus">
+        <label>Selected Source Folders to Index:</label>
+        <div id="folderList" class="folder-list-container"></div>
+
+        <div class="folder-actions-row">
+          <div class="folder-input-wrapper">
+            <input type="text" id="folderInput" placeholder="Enter folder path manually or use buttons below..." onkeydown="if(event.key==='Enter'){addFolderFromInput();event.preventDefault();}">
+            <button class="btn btn-secondary" onclick="addFolderFromInput()">➕ Add Path</button>
+          </div>
+          <button class="btn" onclick="openSystemFolderPicker()" title="Open native OS File Explorer to select a folder">
+            🖥️ Open File Explorer
+          </button>
+          <button class="btn btn-secondary" onclick="openWebFolderBrowser()" title="Browse server folders in an interactive directory browser">
+            📂 Browse Folders...
+          </button>
+          <button class="btn btn-secondary" onclick="addSampleCorpusFolder()" title="Add built-in medical sample corpus">
+            📚 Sample Corpus
+          </button>
+          <button class="btn btn-danger" onclick="clearFolders()" title="Clear folder list">
+            🗑️ Clear All
+          </button>
+        </div>
       </div>
-      <div class="btn-group">
-        <button class="btn" id="btnStartScan" onclick="startScan()">Start Indexing</button>
-        <button class="btn btn-secondary" onclick="useSampleCorpus()">Use Sample Corpus</button>
-        <button class="btn btn-secondary" onclick="controlScan('pause')">Pause</button>
-        <button class="btn btn-secondary" onclick="controlScan('resume')">Resume</button>
-        <button class="btn btn-danger" onclick="controlScan('cancel')">Cancel</button>
-        <button class="btn btn-secondary" onclick="retryFailed()">Retry Failed</button>
+
+      <div class="btn-group" style="margin-top: 1.2rem;">
+        <button class="btn" id="btnStartScan" onclick="startScan()" style="background: #10b981; font-size: 1rem; padding: 0.7rem 1.6rem;">
+          🚀 Start Indexing
+        </button>
+        <button class="btn btn-secondary" onclick="controlScan('pause')">⏸️ Pause</button>
+        <button class="btn btn-secondary" onclick="controlScan('resume')">▶️ Resume</button>
+        <button class="btn btn-danger" onclick="controlScan('cancel')">⏹️ Cancel</button>
+        <button class="btn btn-secondary" onclick="retryFailed()">🔄 Retry Failed</button>
       </div>
 
       <div class="progress-bar-container">
@@ -691,14 +1084,190 @@ SPA_HTML = """<!DOCTYPE html>
     }
   }
 
-  function useSampleCorpus() {
-    document.getElementById('folderInput').value = 'sample_corpus';
+  // Folder Manager State
+  let selectedFolders = [];
+  let currentBrowsePath = '';
+  let currentParentPath = null;
+
+  function renderFolderList() {
+    const listEl = document.getElementById('folderList');
+    if (!listEl) return;
+    if (selectedFolders.length === 0) {
+      listEl.innerHTML = '<span style="color: #94a3b8; font-size: 0.88rem; font-style: italic;">No folders selected yet. Use "Open File Explorer", "Browse Folders...", or "Sample Corpus" to add source folders.</span>';
+      return;
+    }
+    listEl.innerHTML = selectedFolders.map((f, idx) => `
+      <div class="folder-chip">
+        <span>📁</span>
+        <span class="folder-chip-path">${escapeHtml(f)}</span>
+        <button class="chip-remove" onclick="removeFolder(${idx})" title="Remove this folder">✕</button>
+      </div>
+    `).join('');
+  }
+
+  function addFolder(path) {
+    if (!path) return;
+    const clean = path.trim();
+    if (clean && !selectedFolders.includes(clean)) {
+      selectedFolders.push(clean);
+      renderFolderList();
+    }
+  }
+
+  function removeFolder(idx) {
+    selectedFolders.splice(idx, 1);
+    renderFolderList();
+  }
+
+  function clearFolders() {
+    selectedFolders = [];
+    const input = document.getElementById('folderInput');
+    if (input) input.value = '';
+    renderFolderList();
+  }
+
+  function addFolderFromInput() {
+    const input = document.getElementById('folderInput');
+    const val = input.value.trim();
+    if (val) {
+      addFolder(val);
+      input.value = '';
+    }
+  }
+
+  function addSampleCorpusFolder() {
+    addFolder('sample_corpus');
+  }
+
+  async function openSystemFolderPicker() {
+    const btn = event?.currentTarget;
+    const origText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Opening File Explorer...';
+    }
+    try {
+      const res = await fetch('/api/fs/native_dialog', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initial_dir: currentBrowsePath || '' })
+      });
+      const data = await res.json();
+      if (data.supported && data.path) {
+        addFolder(data.path);
+      } else if (!data.supported) {
+        // Native dialog not supported without desktop GUI display -> seamless fallback to Web Directory Browser
+        openWebFolderBrowser(currentBrowsePath || '');
+      }
+    } catch (e) {
+      openWebFolderBrowser(currentBrowsePath || '');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = origText;
+      }
+    }
+  }
+
+  async function openWebFolderBrowser(targetPath) {
+    document.getElementById('folderBrowserModal').style.display = 'flex';
+    await loadDirectory(targetPath || '');
+  }
+
+  function closeFolderBrowser() {
+    document.getElementById('folderBrowserModal').style.display = 'none';
+  }
+
+  async function loadDirectory(path) {
+    const listEl = document.getElementById('fbDirList');
+    listEl.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading folders...</div>';
+
+    try {
+      const url = '/api/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
+      const res = await fetch(url);
+      const data = await res.json();
+
+      currentBrowsePath = data.current_path;
+      currentParentPath = data.parent_path;
+      document.getElementById('fbSelectedPath').textContent = currentBrowsePath;
+
+      const upBtn = document.getElementById('fbUpBtn');
+      if (currentParentPath && currentParentPath !== currentBrowsePath) {
+        upBtn.disabled = false;
+        upBtn.style.opacity = '1';
+      } else {
+        upBtn.disabled = true;
+        upBtn.style.opacity = '0.4';
+      }
+
+      // Render Shortcuts
+      const shortcutsEl = document.getElementById('fbShortcuts');
+      shortcutsEl.innerHTML = data.shortcuts.map(s => `
+        <span class="fb-shortcut-pill" onclick="loadDirectory('${escapeHtml(s.path.replace(/\\/g, '/'))}')">${escapeHtml(s.name)}</span>
+      `).join('');
+
+      // Render Breadcrumbs
+      const bcEl = document.getElementById('fbBreadcrumbs');
+      bcEl.innerHTML = data.breadcrumbs.map((b, i) => `
+        ${i > 0 ? '<span style="color: #94a3b8;">/</span>' : ''}
+        <span class="fb-breadcrumb-item" onclick="loadDirectory('${escapeHtml(b.path.replace(/\\/g, '/'))}')">${escapeHtml(b.name)}</span>
+      `).join('');
+
+      // Render Subdirectories
+      if (!data.subdirectories || data.subdirectories.length === 0) {
+        listEl.innerHTML = '<div style="color: #94a3b8; padding: 2rem; text-align: center; grid-column: 1 / -1;">(No subdirectories found in this folder)</div>';
+      } else {
+        listEl.innerHTML = data.subdirectories.map(d => `
+          <div class="fb-dir-item" ondblclick="loadDirectory('${escapeHtml(d.path.replace(/\\/g, '/'))}')" onclick="selectFbItem(this, '${escapeHtml(d.path.replace(/\\/g, '/'))}')">
+            <span>📁</span>
+            <span style="font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(d.name)}</span>
+          </div>
+        `).join('');
+      }
+    } catch (e) {
+      listEl.innerHTML = `<div style="color: var(--accent-red); padding: 1.5rem; text-align: center; grid-column: 1 / -1;">Failed to load directory: ${e}</div>`;
+    }
+  }
+
+  function selectFbItem(el, path) {
+    document.querySelectorAll('.fb-dir-item').forEach(item => item.classList.remove('selected'));
+    el.classList.add('selected');
+    currentBrowsePath = path;
+    document.getElementById('fbSelectedPath').textContent = path;
+  }
+
+  function fbGoUp() {
+    if (currentParentPath) {
+      loadDirectory(currentParentPath);
+    }
+  }
+
+  function confirmFolderSelection() {
+    if (currentBrowsePath) {
+      addFolder(currentBrowsePath);
+    }
+    closeFolderBrowser();
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
   }
 
   async function startScan() {
-    const val = document.getElementById('folderInput').value.trim();
-    const folders = val ? [val] : [];
-    document.getElementById('activityLogs').textContent = 'Starting indexing scan...';
+    let folders = [];
+    if (selectedFolders.length > 0) {
+      folders = [...selectedFolders];
+    } else {
+      const val = document.getElementById('folderInput').value.trim();
+      if (val) folders = [val];
+    }
+
+    if (folders.length === 0) {
+      folders = ['sample_corpus'];
+    }
+
+    document.getElementById('activityLogs').textContent = 'Starting indexing scan for ' + folders.length + ' folder(s)...';
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -862,6 +1431,47 @@ SPA_HTML = """<!DOCTYPE html>
   loadStats();
   setInterval(loadStats, 10000);
 </script>
+<!-- Web File Explorer Modal -->
+<div id="folderBrowserModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closeFolderBrowser();">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div style="font-weight: 700; font-size: 1.1rem; display: flex; align-items: center; gap: 8px;">
+        📂 File Explorer — Select Folder to Index
+      </div>
+      <button class="modal-close" onclick="closeFolderBrowser()">✕</button>
+    </div>
+
+    <!-- Shortcuts Bar -->
+    <div class="fb-shortcuts" id="fbShortcuts"></div>
+
+    <!-- Navigation Breadcrumbs -->
+    <div class="fb-nav-bar">
+      <button class="btn btn-secondary" id="fbUpBtn" onclick="fbGoUp()" title="Go up one level" style="padding: 0.35rem 0.75rem;">
+        ⬆️ Up
+      </button>
+      <div class="fb-breadcrumbs" id="fbBreadcrumbs"></div>
+    </div>
+
+    <!-- Directory Grid -->
+    <div class="fb-list-container" id="fbDirList">
+      <div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading folders...</div>
+    </div>
+
+    <!-- Modal Footer -->
+    <div class="modal-footer">
+      <div style="flex: 1; min-width: 200px;">
+        <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); display: block;">Current Selected Folder:</span>
+        <span id="fbSelectedPath" style="font-family: monospace; font-size: 0.88rem; font-weight: 600; word-break: break-all; color: var(--primary-dark);"></span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-secondary" onclick="closeFolderBrowser()">Cancel</button>
+        <button class="btn" onclick="confirmFolderSelection()" style="background: #10b981;">
+          ✅ Select This Folder
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 """
