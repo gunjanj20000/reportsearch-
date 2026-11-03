@@ -17,7 +17,7 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import logger, DEFAULT_DB_PATH, EXPORTS_DIR, find_libreoffice_binary, find_tesseract_binary, format_bytes
+from .config import logger, DEFAULT_DB_PATH, EXPORTS_DIR, find_libreoffice_binary, find_tesseract_binary, format_bytes, resolve_network_path
 from .database.connection import DatabaseManager
 from .engine.indexer_engine import IndexerEngine
 from .search.search_service import SearchService, SearchResponse
@@ -116,6 +116,161 @@ def open_native_folder_dialog(initial_dir: Optional[str] = None) -> Tuple[bool, 
             pass
 
     return False, None, "Native OS file dialog not supported on this host environment without desktop display."
+
+def get_system_network_mounts() -> List[Dict[str, str]]:
+    """
+    Detect active network mounts, CIFS/Samba shares, NFS exports, and GVFS connections.
+    """
+    mounts: List[Dict[str, str]] = []
+    seen_paths = set()
+
+    # 1. Linux /proc/mounts
+    if os.path.exists("/proc/mounts"):
+        net_fs = {"cifs", "smbfs", "nfs", "nfs4", "fuse.gvfsd-fuse", "sshfs", "9p", "davfs"}
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 3:
+                        device, mountpoint, fstype = parts[0], parts[1], parts[2]
+                        if fstype in net_fs:
+                            if os.path.isdir(mountpoint) and mountpoint not in seen_paths:
+                                seen_paths.add(mountpoint)
+                                label = f"🌐 {os.path.basename(mountpoint) or mountpoint} ({fstype})"
+                                mounts.append({"name": label, "path": mountpoint, "type": fstype, "device": device})
+        except Exception:
+            pass
+
+    # 2. Linux GNOME / Ubuntu GVFS SMB Mounts
+    user_id = os.getuid() if hasattr(os, "getuid") else 1000
+    gvfs_dir = Path(f"/run/user/{user_id}/gvfs")
+    if gvfs_dir.exists():
+        try:
+            for entry in gvfs_dir.iterdir():
+                if entry.is_dir() and str(entry) not in seen_paths:
+                    seen_paths.add(str(entry))
+                    clean_name = entry.name.replace("smb-share:", "SMB: ").replace("sftp:", "SFTP: ")
+                    mounts.append({
+                        "name": f"🌐 {clean_name}",
+                        "path": str(entry.resolve()),
+                        "type": "gvfs",
+                        "device": entry.name
+                    })
+        except Exception:
+            pass
+
+    # 3. Common network mount directories if populated
+    for common_dir in ["/mnt", "/media"]:
+        p = Path(common_dir)
+        if p.exists():
+            try:
+                for sub in p.iterdir():
+                    if sub.is_dir() and str(sub) not in seen_paths:
+                        seen_paths.add(str(sub))
+                        mounts.append({
+                            "name": f"📁 {sub.name} ({common_dir})",
+                            "path": str(sub.resolve()),
+                            "type": "mount",
+                            "device": str(sub)
+                        })
+            except Exception:
+                pass
+
+    # 4. Windows Mapped Network Drives
+    if sys.platform == "win32":
+        import string
+        for letter in string.ascii_uppercase[2:]:
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                try:
+                    mounts.append({
+                        "name": f"💾 Drive {letter}:",
+                        "path": drive,
+                        "type": "drive",
+                        "device": drive
+                    })
+                except Exception:
+                    pass
+
+    return mounts
+
+
+def test_network_path(path_str: str) -> Dict[str, Any]:
+    """
+    Validates a network folder or UNC path.
+    Tests accessibility, counts files/documents, and resolves GVFS/SMB mappings.
+    """
+    clean = path_str.strip()
+    if not clean:
+        return {"valid": False, "error": "Path cannot be empty."}
+
+    resolved = resolve_network_path(clean)
+    p = Path(resolved)
+
+    # If doesn't exist, try gio mount if on Linux and it starts with smb:// or \
+    if not p.exists() and sys.platform.startswith("linux") and (clean.startswith(("\\", "//", "smb://"))):
+        smb_url = clean
+        if clean.startswith(("\\", "//")):
+            smb_url = "smb://" + clean.lstrip("\\/").replace("\\", "/")
+
+        gio = shutil.which("gio")
+        if gio:
+            try:
+                subprocess.run([gio, "mount", smb_url], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8)
+                resolved_after = resolve_network_path(clean)
+                p = Path(resolved_after)
+                if p.exists() and p.is_dir():
+                    resolved = resolved_after
+            except Exception:
+                pass
+
+    if not p.exists():
+        return {
+            "valid": False,
+            "resolved_path": resolved,
+            "error": f"Folder '{clean}' could not be reached or does not exist. Ensure the network share is online and accessible."
+        }
+
+    if not p.is_dir():
+        return {
+            "valid": False,
+            "resolved_path": resolved,
+            "error": f"'{clean}' is a file, not a directory. Please provide a folder path."
+        }
+
+    doc_count = 0
+    sample_files = []
+    supported_exts = {".pdf", ".docx", ".doc", ".txt"}
+    try:
+        for root, _, files in os.walk(resolved):
+            for f in files:
+                ext = Path(f).suffix.lower()
+                if ext in supported_exts:
+                    doc_count += 1
+                    if len(sample_files) < 4:
+                        sample_files.append(f)
+    except PermissionError:
+        return {
+            "valid": False,
+            "resolved_path": resolved,
+            "error": f"Permission denied accessing '{clean}'. Please check network share credentials."
+        }
+    except Exception as e:
+        return {
+            "valid": False,
+            "resolved_path": resolved,
+            "error": f"Error accessing network path: {e}"
+        }
+
+    return {
+        "valid": True,
+        "original_path": clean,
+        "resolved_path": str(p.resolve()),
+        "doc_count_est": doc_count,
+        "sample_files": sample_files,
+        "message": f"Successfully connected! Found {doc_count} medical documents in this network folder."
+    }
+
 
 
 # Global state for web server background tasks
@@ -397,7 +552,14 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # 9. Document Page Note API (Read-only, 0 bytes added to index)
+        # 9. Active Network Mounts API
+        if path == "/api/fs/network_mounts":
+            self.send_json({
+                "mounts": get_system_network_mounts()
+            })
+            return
+
+        # 10. Document Page Note API (Read-only, 0 bytes added to index)
         if path == "/api/document/page":
             try:
                 doc_id = int(params.get("doc_id", ["0"])[0])
@@ -565,7 +727,14 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # 7. Generate Portable Database Export
+        # 7. Network Share & UNC Path Verification API
+        if path == "/api/fs/network_check":
+            net_path = data.get("path", "").strip()
+            res = test_network_path(net_path)
+            self.send_json(res)
+            return
+
+        # 8. Generate Portable Database Export
         if path == "/api/export":
             export_type = data.get("type", "compact").lower()
             compress = data.get("compress", True)
@@ -1301,8 +1470,11 @@ SPA_HTML = r"""<!DOCTYPE html>
         </div>
 
         <div class="folder-action-buttons">
-          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnBrowseFolder" title="Choose any folder on your computer to index">
+          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnBrowseFolder" title="Choose any local or mounted folder">
             <span>📂</span> <strong>Browse Folder...</strong>
+          </button>
+          <button class="btn btn-secondary" onclick="openNetworkFolderModal()" id="btnNetworkFolder" title="Connect to a network share, Windows UNC path, or NAS">
+            <span>🌐</span> <strong>Network Folder...</strong>
           </button>
           <button class="btn btn-secondary" onclick="resetToSampleCorpus()" title="Switch back to sample corpus">
             <span>📚</span> Use Sample Corpus
@@ -1466,6 +1638,49 @@ SPA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- Network Folder Modal (UNC / SMB / CIFS / NFS Shares) -->
+<div id="networkFolderModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closeNetworkFolderModal();">
+  <div class="modal-box" style="max-width: 680px;">
+    <div class="modal-header">
+      <div class="modal-header-title">
+        <span>🌐</span> Connect Network Folder / UNC Share
+      </div>
+      <button class="modal-close" onclick="closeNetworkFolderModal()" title="Close (Esc)">✕</button>
+    </div>
+
+    <div style="padding: 1.25rem 1.5rem;">
+      <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">
+        Enter a Windows UNC path (e.g. <code>\\server\share\folder</code>), an SMB share (e.g. <code>smb://192.168.1.100/records</code>), or a network mount path (e.g. <code>/mnt/nas/reports</code>).
+      </p>
+
+      <div style="display: flex; gap: 8px; margin-bottom: 1rem;">
+        <input type="text" id="netPathInput" placeholder="\\192.168.1.50\cardiology or /mnt/nfs" style="flex: 1; padding: 0.7rem 0.9rem; border-radius: 7px; border: 1.5px solid var(--border); font-family: monospace; font-size: 0.95rem;" onkeydown="if(event.key==='Enter')checkAndApplyNetworkPath();">
+        <button class="btn btn-primary" onclick="checkAndApplyNetworkPath()" id="btnTestNetPath">
+          🔍 Connect & Verify
+        </button>
+      </div>
+
+      <!-- Verification Result Box -->
+      <div id="netStatusBox" style="display: none; padding: 1rem; border-radius: 8px; margin-bottom: 1.25rem; font-size: 0.9rem;"></div>
+
+      <!-- Detected Network Mounts on Host -->
+      <div style="border-top: 1px solid var(--border); padding-top: 1rem;">
+        <div style="font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.6rem;">
+          Detected Active Network Shares & Mounts:
+        </div>
+        <div id="detectedNetMountsList" style="display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto;">
+          <div style="color: var(--text-muted); font-size: 0.88rem; font-style: italic;">Scanning network mounts...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <span style="font-size: 0.8rem; color: var(--text-muted);">Supports CIFS, SMB, NFS, and Windows UNC shares.</span>
+      <button class="btn btn-secondary" onclick="closeNetworkFolderModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Page Note Modal (Small Note for Exact Page Content) -->
 <div id="pageNoteModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closePageNote();">
   <div class="note-box">
@@ -1522,6 +1737,110 @@ SPA_HTML = r"""<!DOCTYPE html>
     document.getElementById(tabId).classList.add('active');
     if (tabId === 'tabSynonyms') loadSynonyms();
     if (tabId === 'tabExport') loadExportPreview();
+  }
+
+
+  // --- Network Folder Functions ---
+  async function openNetworkFolderModal() {
+    const modal = document.getElementById('networkFolderModal');
+    if (modal) modal.style.display = 'flex';
+    document.getElementById('netStatusBox').style.display = 'none';
+    await loadDetectedNetworkMounts();
+  }
+
+  function closeNetworkFolderModal() {
+    const modal = document.getElementById('networkFolderModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function loadDetectedNetworkMounts() {
+    const listEl = document.getElementById('detectedNetMountsList');
+    if (!listEl) return;
+
+    try {
+      const res = await fetch('/api/fs/network_mounts');
+      const data = await res.json();
+      if (!data.mounts || data.mounts.length === 0) {
+        listEl.innerHTML = '<div style="color: #94a3b8; font-size: 0.88rem; padding: 0.5rem 0;">No mounted shares automatically detected. You can enter your share path above (e.g. \\\\server\\share or /mnt/share).</div>';
+      } else {
+        listEl.innerHTML = data.mounts.map(m => `
+          <div style="display:flex; justify-content:space-between; align-items:center; background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:8px 12px;">
+            <div>
+              <div style="font-weight:600; font-size:0.9rem;">${escapeHtml(m.name)}</div>
+              <div style="font-family:monospace; font-size:0.8rem; color:var(--text-muted);">${escapeHtml(m.path)}</div>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="selectNetworkShare('${encodeURIComponent(m.path)}')">
+              ✅ Select
+            </button>
+          </div>
+        `).join('');
+      }
+    } catch (e) {
+      listEl.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem;">Mount detection: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function checkAndApplyNetworkPath() {
+    const input = document.getElementById('netPathInput');
+    const pathVal = input.value.trim();
+    if (!pathVal) return;
+
+    const btn = document.getElementById('btnTestNetPath');
+    btn.disabled = true;
+    btn.textContent = '⏳ Checking...';
+
+    const statusBox = document.getElementById('netStatusBox');
+    statusBox.style.display = 'block';
+    statusBox.style.background = '#f8fafc';
+    statusBox.style.border = '1px solid var(--border)';
+    statusBox.innerHTML = 'Connecting to network share and testing accessibility...';
+
+    try {
+      const res = await fetch('/api/fs/network_check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: pathVal })
+      });
+      const data = await res.json();
+
+      if (data.valid) {
+        statusBox.style.background = '#f0fdf4';
+        statusBox.style.border = '1px solid #86efac';
+        statusBox.innerHTML = `
+          <div style="color: #166534; font-weight: 700; margin-bottom: 4px;">✅ Network Share Accessible!</div>
+          <div style="color: #15803d; font-size: 0.88rem; margin-bottom: 8px;">${escapeHtml(data.message)}</div>
+          <button class="btn btn-sm btn-success" onclick="selectNetworkShare('${encodeURIComponent(data.resolved_path)}', '${encodeURIComponent(data.original_path)}')">
+            ✅ Use This Folder for Indexing
+          </button>
+        `;
+      } else {
+        statusBox.style.background = '#fef2f2';
+        statusBox.style.border = '1px solid #fca5a5';
+        statusBox.innerHTML = `
+          <div style="color: #991b1b; font-weight: 700; margin-bottom: 4px;">❌ Connection Failed</div>
+          <div style="color: #b91c1c; font-size: 0.88rem;">${escapeHtml(data.error || 'Share is not reachable.')}</div>
+        `;
+      }
+    } catch (e) {
+      statusBox.style.background = '#fef2f2';
+      statusBox.style.border = '1px solid #fca5a5';
+      statusBox.innerHTML = `<div style="color:#b91c1c;">Connection error: ${escapeHtml(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '🔍 Connect & Verify';
+    }
+  }
+
+  function selectNetworkShare(encodedResolved, encodedOriginal) {
+    const resolved = decodeURIComponent(encodedResolved);
+    const original = encodedOriginal ? decodeURIComponent(encodedOriginal) : resolved;
+    currentSelectedFolderPath = resolved;
+    const el = document.getElementById('displayCurrentFolder');
+    if (el) {
+      el.innerHTML = `🌐 <strong>${escapeHtml(original)}</strong> <span style="font-size:0.8rem; color:var(--text-muted); font-weight:normal;">(${escapeHtml(resolved)})</span>`;
+    }
+    closeNetworkFolderModal();
+    alert(`Network folder selected: ${original}\n\nClick '🚀 Start Indexing' to begin scanning.`);
   }
 
   // --- Folder Browser ---
@@ -1958,6 +2277,7 @@ SPA_HTML = r"""<!DOCTYPE html>
     if (e.key === 'Escape') {
       closePageNote();
       closeFolderBrowser();
+      closeNetworkFolderModal();
     }
   });
 

@@ -148,3 +148,48 @@ def format_bytes(num_bytes: int) -> str:
 
 # Global default logger
 logger = setup_logger("medsearch")
+
+
+def resolve_network_path(path_str: str) -> str:
+    r"""
+    Resolve and normalize network folder paths (Windows UNC, Linux CIFS/NFS/GVFS).
+    Supports:
+      - Windows UNC paths (\\server\share\subfolder)
+      - Forward-slash network paths (//server/share/subfolder)
+      - Linux SMB/CIFS URLs (smb://server/share/subfolder)
+      - GNOME/Ubuntu GVFS automatic mount mapping (/run/user/<uid>/gvfs/smb-share:...)
+      - Standard local and mounted directory paths (/mnt/..., /media/...)
+    """
+    if not path_str:
+        return path_str
+
+    clean = str(path_str).strip()
+
+    # 1. Check if already directly accessible
+    p = Path(clean)
+    try:
+        if p.exists() and p.is_dir():
+            return str(p.resolve())
+    except (PermissionError, OSError):
+        pass
+
+    # 2. Linux GVFS SMB resolution
+    if sys.platform.startswith("linux"):
+        import re
+        m = re.match(r"^(?:\\\\|//|smb://)([^/\\\\]+)[/\\\\]([^/\\\\]+)(?:[/\\\\](.*))?$", clean)
+        if m:
+            server, share, subpath = m.group(1), m.group(2), m.group(3) or ""
+            user_id = os.getuid() if hasattr(os, "getuid") else 1000
+            gvfs_dir = Path(f"/run/user/{user_id}/gvfs")
+            if gvfs_dir.exists():
+                try:
+                    for entry in gvfs_dir.iterdir():
+                        name_lower = entry.name.lower()
+                        if server.lower() in name_lower and share.lower() in name_lower:
+                            target = entry / subpath if subpath else entry
+                            if target.exists() and target.is_dir():
+                                return str(target.resolve())
+                except Exception:
+                    pass
+
+    return clean

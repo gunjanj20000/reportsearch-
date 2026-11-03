@@ -140,3 +140,42 @@ def test_api_document_page_invalid(web_server):
         assert False, "Should have raised HTTPError 404"
     except urllib.error.HTTPError as e:
         assert e.code == 404
+
+
+def test_api_fs_network_mounts(web_server):
+    """Test /api/fs/network_mounts returns active network mounts list."""
+    with urllib.request.urlopen(f"{web_server}/api/fs/network_mounts") as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert "mounts" in data
+        assert isinstance(data["mounts"], list)
+
+
+def test_api_fs_network_check_valid(web_server):
+    """Test /api/fs/network_check verifies and resolves existing folder."""
+    req = urllib.request.Request(
+        f"{web_server}/api/fs/network_check",
+        data=json.dumps({"path": "sample_corpus"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["valid"] is True
+        assert data["doc_count_est"] > 0
+        assert "sample_files" in data
+        assert "resolved_path" in data
+
+
+def test_api_fs_network_check_invalid(web_server):
+    """Test /api/fs/network_check returns clean error for unreachable path."""
+    req = urllib.request.Request(
+        f"{web_server}/api/fs/network_check",
+        data=json.dumps({"path": "/nonexistent_network_path_12345"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["valid"] is False
+        assert "error" in data

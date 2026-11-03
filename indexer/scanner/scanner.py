@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Iterator, Optional
 
-from ..config import SUPPORTED_EXTENSIONS, logger
+from ..config import SUPPORTED_EXTENSIONS, logger, resolve_network_path
 
 
 @dataclass
@@ -47,7 +47,13 @@ class FileScanner:
         if existing_paths is None:
             existing_paths = {}
 
-        valid_folders = [Path(f).resolve() for f in folders if Path(f).exists() and Path(f).is_dir()]
+        valid_folders = []
+        for f in folders:
+            resolved_p = Path(resolve_network_path(str(f)))
+            if resolved_p.exists() and resolved_p.is_dir():
+                valid_folders.append(resolved_p.resolve())
+            else:
+                logger.warning(f"Folder path not found or not a directory: {f}")
         result = ScanResult(folders=valid_folders)
         seen_paths: Set[str] = set()
 
