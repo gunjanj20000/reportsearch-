@@ -1,0 +1,20 @@
+DISCHARGE SUMMARY & CATH REPORT — CASE #3005
+============================================================
+Patient Diagnosis: Complex CAD with Intravascular Lithotripsy for Severely Calcified Coronary Arteries
+Primary Operator: Dr. Interventionalist, MD
+Procedure Performed: Percutaneous Coronary Intervention with IVL
+
+PROCEDURE DESCRIPTION:
+Selective angiogram confirmed severe narrowing. Pulsed acoustic pressure waves via Intravascular Lithotripsy (IVL) Shockwave system. Circumferential calcium fracture without soft tissue trauma, improving stent deliverability and compliance.
+Lesion preparation was initiated with semi-compliant balloons.
+Intravascular ultrasound (IVUS) confirmed reference diameter of 3.5mm.
+Drug-eluting stent deployed with post-dilation at 18 atm.
+Final angiogram showed TIMI 3 flow without dissection or distal embolization.
+
+DISCHARGE MEDICATIONS:
+1. Aspirin 81 mg daily
+2. Ticagrelor 90 mg BID
+3. Atorvastatin 80 mg daily
+4. Metoprolol succinate 50 mg daily
+============================================================
+End of Clinical Summary.

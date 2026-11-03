@@ -1,0 +1,20 @@
+DISCHARGE SUMMARY & CATH REPORT — CASE #3007
+============================================================
+Patient Diagnosis: Complex CAD with Transcatheter Aortic Valve Implantation Clinical Registries
+Primary Operator: Dr. Interventionalist, MD
+Procedure Performed: Percutaneous Coronary Intervention with TAVI
+
+PROCEDURE DESCRIPTION:
+Selective angiogram confirmed severe narrowing. Long-term outcomes of Transcatheter Aortic Valve Implantation (TAVI / TAVR) in low, intermediate, and high surgical risk patients. Pacemaker implantation rates, paravalvular regurgitation, and leaflet thrombosis.
+Lesion preparation was initiated with semi-compliant balloons.
+Intravascular ultrasound (IVUS) confirmed reference diameter of 3.5mm.
+Drug-eluting stent deployed with post-dilation at 18 atm.
+Final angiogram showed TIMI 3 flow without dissection or distal embolization.
+
+DISCHARGE MEDICATIONS:
+1. Aspirin 81 mg daily
+2. Ticagrelor 90 mg BID
+3. Atorvastatin 80 mg daily
+4. Metoprolol succinate 50 mg daily
+============================================================
+End of Clinical Summary.

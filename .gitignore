@@ -1,0 +1,19 @@
+# Virtual environment
+venv/
+.env
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Data & logs
+logs/
+data/*.db-wal
+data/*.db-shm
+
+# Build
+build/
+dist/
+*.spec

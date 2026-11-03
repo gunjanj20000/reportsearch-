@@ -1,0 +1,14 @@
+# Medical Literature Search - Windows Indexer & Offline Search System
+# Requirements for Indexer Engine and Desktop Application
+
+PySide6>=6.7.0
+pymupdf>=1.24.0
+python-docx>=1.1.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
+zstandard>=0.22.0
+pytest>=8.0.0
+google-api-python-client>=2.120.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+pyinstaller>=6.5.0
