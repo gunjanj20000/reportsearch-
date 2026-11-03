@@ -868,7 +868,7 @@ SPA_HTML = """<!DOCTYPE html>
 """
 
 
-def run_web_server(host: str = "0.0.0.0", port: int = 8080, db_path: Path = DEFAULT_DB_PATH) -> None:
+def run_web_server(host: str = "0.0.0.0", port: int = 8080, db_path: Path = DEFAULT_DB_PATH, open_browser: bool = True) -> None:
     """Start the HTTP server on the specified host and port."""
     global _state
     _state = WebState(db_path)
@@ -884,6 +884,16 @@ def run_web_server(host: str = "0.0.0.0", port: int = 8080, db_path: Path = DEFA
     print(f"  Database:      {Path(db_path).resolve()}")
     print("=" * 65)
     print("  Press Ctrl+C to stop the web server.\n")
+
+    if open_browser:
+        def try_open():
+            time.sleep(0.6)
+            try:
+                import webbrowser
+                webbrowser.open(f"http://localhost:{port}/")
+            except Exception:
+                pass
+        threading.Thread(target=try_open, daemon=True).start()
 
     try:
         server.serve_forever()

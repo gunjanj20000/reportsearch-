@@ -34,6 +34,12 @@ else
     source venv/bin/activate
 fi
 
+# Fix potential NumPy X86_V2 incompatibility on older CPUs / virtual machine processors
+if python3 -c "import numpy" 2>&1 | grep -q "X86_V2"; then
+    echo "[INFO] Detected NumPy X86_V2 incompatibility with CPU. Installing compatible numpy<2.4.0..."
+    pip install "numpy<2.4.0" --quiet
+fi
+
 # 3. Handle help, explicit CLI flag, or CLI subcommands
 if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "Usage: ./run_indexer.sh [OPTIONS | COMMAND]"
@@ -66,11 +72,11 @@ if [ "$1" = "--web" ] || [ "$1" = "web" ]; then
     exec python -m indexer.web "$@"
 fi
 
-# 4. Probe PySide6 CPU compatibility in an isolated subshell
+# 4. Probe PySide6 CPU compatibility in an isolated Python process
 CAN_RUN_QT=false
 if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
     # Test if Qt6 can initialize without CPU abort (SSE4.2 / POPCNT check)
-    if (python -c "import PySide6.QtWidgets" >/dev/null 2>&1); then
+    if python3 -c "import subprocess, sys; sys.exit(0 if subprocess.run([sys.executable, '-c', 'import PySide6.QtWidgets'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 else 1)" 2>/dev/null; then
         CAN_RUN_QT=true
     fi
 fi

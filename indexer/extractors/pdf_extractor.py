@@ -8,6 +8,14 @@ from typing import List, Optional
 
 import pymupdf
 from PIL import Image
+
+# CPU compatibility guard: pytesseract imports numpy if present, but crashes on older CPUs if numpy raises RuntimeError
+try:
+    import numpy
+except Exception:
+    import sys
+    sys.modules["numpy"] = None
+
 import pytesseract
 
 from .base import BaseExtractor
