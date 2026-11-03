@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background-color: #020617;
+  color: #f8fafc;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* iOS Safe Areas */
+.safe-top {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+}
+
+.safe-bottom {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+/* High contrast medical term highlights in search snippets */
+mark.highlight,
+.snippet-text mark {
+  background-color: rgba(56, 189, 248, 0.28);
+  color: #7dd3fc;
+  font-weight: 600;
+  padding: 0.1rem 0.25rem;
+  border-radius: 0.25rem;
+  border-bottom: 1.5px solid #38bdf8;
+}
+
+/* Hide scrollbars for horizontal pill tabs */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Prevent iOS zooming on input focus */
+input[type="search"],
+input[type="text"] {
+  font-size: 16px !important;
+}

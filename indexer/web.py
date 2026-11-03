@@ -429,6 +429,53 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
+    def serve_static_file(self, file_path: Path, content_type: Optional[str] = None) -> None:
+        """Serve static asset with appropriate MIME headers and OPFS security headers."""
+        if not file_path.is_file():
+            self.send_error(404, "File Not Found")
+            return
+
+        ext = file_path.suffix.lower()
+        if content_type is None:
+            mime_map = {
+                ".html": "text/html; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".mjs": "application/javascript; charset=utf-8",
+                ".css": "text/css; charset=utf-8",
+                ".wasm": "application/wasm",
+                ".webmanifest": "application/manifest+json; charset=utf-8",
+                ".json": "application/json; charset=utf-8",
+                ".svg": "image/svg+xml",
+                ".png": "image/png",
+                ".ico": "image/x-icon",
+                ".zst": "application/zstd",
+                ".db": "application/octet-stream",
+            }
+            content_type = mime_map.get(ext, "application/octet-stream")
+
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+        except OSError:
+            self.send_error(500, "Failed to read file")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        # COOP & COEP required for SQLite WASM + OPFS
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        self.send_header("Access-Control-Allow-Origin", "*")
+
+        if ext in (".html", ".webmanifest") or file_path.name == "sw.js":
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        else:
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
@@ -718,6 +765,49 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(html_bytes)
             return
+
+        # 12. Universal Mobile Search React + TypeScript PWA (Phase 4 & 5)
+        pwa_dist = Path(__file__).resolve().parent.parent / "pwa" / "dist"
+
+        # PWA entry points
+        if path in ("/pwa", "/pwa/", "/mobile", "/mobile/"):
+            index_path = pwa_dist / "index.html"
+            if index_path.exists():
+                self.serve_static_file(index_path, "text/html; charset=utf-8")
+                return
+
+        # PWA subpaths: /pwa/... or /mobile/...
+        if path.startswith(("/pwa/", "/mobile/")):
+            rel_sub = path.split("/", 2)[-1]
+            candidate = (pwa_dist / rel_sub).resolve()
+            if candidate.is_file() and candidate.is_relative_to(pwa_dist):
+                self.serve_static_file(candidate)
+                return
+            index_path = pwa_dist / "index.html"
+            if index_path.exists():
+                self.serve_static_file(index_path, "text/html; charset=utf-8")
+                return
+
+        # Root static assets referenced by PWA
+        if pwa_dist.exists() and path != "/":
+            clean_rel = path.lstrip("/")
+            candidate = (pwa_dist / clean_rel).resolve()
+            if candidate.is_file() and candidate.is_relative_to(pwa_dist):
+                self.serve_static_file(candidate)
+                return
+
+        # Compact database export direct download
+        if path in ("/exports/medical_search_compact.db.zst", "/api/db/compact.zst"):
+            compact_path = Path(__file__).resolve().parent.parent / "exports" / "medical_search_compact.db.zst"
+            if compact_path.exists():
+                self.serve_static_file(compact_path, "application/zstd")
+                return
+
+        if path in ("/exports/medical_search_compact.db", "/api/db/compact.db"):
+            compact_db_path = Path(__file__).resolve().parent.parent / "exports" / "medical_search_compact.db"
+            if compact_db_path.exists():
+                self.serve_static_file(compact_db_path, "application/octet-stream")
+                return
 
         self.send_error(404, "Not Found")
 
@@ -1562,7 +1652,10 @@ SPA_HTML = r"""<!DOCTYPE html>
 
 <header>
   <h1>🫀 Medical Literature Search & Discovery</h1>
-  <div class="status-badge" id="headerStatus">● Ready</div>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <a href="/pwa/" target="_blank" class="pwa-header-link" title="Open Mobile Search PWA (Offline SQLite WASM + OPFS)">📱 Mobile PWA</a>
+    <div class="status-badge" id="headerStatus">● Ready</div>
+  </div>
 </header>
 
 <div class="container">

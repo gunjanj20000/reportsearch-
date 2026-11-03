@@ -193,3 +193,36 @@ def test_get_attached_storage_devices():
         assert "name" in dev
         assert "path" in dev
         assert "type" in dev
+
+
+def test_pwa_html_served(web_server):
+    """Test /pwa/ serves the compiled React + TypeScript PWA with COOP/COEP headers."""
+    with urllib.request.urlopen(f"{web_server}/pwa/") as resp:
+        assert resp.status == 200
+        assert "text/html" in resp.headers.get("Content-Type", "")
+        assert resp.headers.get("Cross-Origin-Opener-Policy") == "same-origin"
+        assert resp.headers.get("Cross-Origin-Embedder-Policy") == "require-corp"
+        html = resp.read().decode("utf-8")
+        assert "MedSearch" in html or "root" in html
+
+
+def test_pwa_manifest_and_sw(web_server):
+    """Test PWA manifest and service worker are served with proper headers."""
+    with urllib.request.urlopen(f"{web_server}/manifest.webmanifest") as resp:
+        assert resp.status == 200
+        assert "application/manifest+json" in resp.headers.get("Content-Type", "")
+
+    with urllib.request.urlopen(f"{web_server}/sw.js") as resp:
+        assert resp.status == 200
+        assert "application/javascript" in resp.headers.get("Content-Type", "")
+
+
+def test_compact_database_download(web_server):
+    """Test /exports/medical_search_compact.db.zst endpoint serves the compressed database."""
+    with urllib.request.urlopen(f"{web_server}/exports/medical_search_compact.db.zst") as resp:
+        assert resp.status == 200
+        assert resp.headers.get("Content-Type") == "application/zstd"
+        data = resp.read()
+        assert len(data) > 1000
+        # Zstandard magic bytes
+        assert data[:4] == b"\x28\xb5\x2f\xfd"

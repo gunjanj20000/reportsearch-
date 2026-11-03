@@ -115,8 +115,9 @@ else
         echo "[NOTICE] No graphical display detected (DISPLAY is not set)."
     fi
     echo ""
-    echo "[INFO] Starting the Web Dashboard instead..."
-    echo "       Open http://localhost:8080 in your browser to access the GUI."
+    echo "[INFO] Starting the Web Dashboard & Mobile PWA instead..."
+    echo "       • Web Dashboard:  http://localhost:8080/"
+    echo "       • Mobile PWA:     http://localhost:8080/pwa (Offline SQLite WASM + OPFS)"
     echo "       (To run in terminal CLI mode instead: ./run_indexer.sh stats)"
     echo ""
     exec python -m indexer.web "$@"

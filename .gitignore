@@ -17,3 +17,12 @@ data/*.db-shm
 build/
 dist/
 *.spec
+
+# Node & Frontend
+node_modules/
+pwa/node_modules/
+.npm/
+
+# Include pre-built PWA distribution for zero-dependency serving
+!pwa/dist/
+!pwa/dist/**
