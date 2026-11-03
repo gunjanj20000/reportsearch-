@@ -104,6 +104,20 @@ def main() -> None:
     syn_p.add_argument("--add", nargs=2, metavar=("TERM", "EXPANSION"), help="Add a custom synonym")
     syn_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
 
+    # Export command (Phase 3)
+    export_p = subparsers.add_parser("export", help="Export portable database or incremental package")
+    export_p.add_argument(
+        "--type",
+        choices=["search-only", "full", "incremental"],
+        default="search-only",
+        help="Export package type (default: search-only)"
+    )
+    export_p.add_argument("--output", "-o", required=True, help="Destination file path")
+    export_p.add_argument("--compress", action="store_true", help="Enable Zstandard compression")
+    export_p.add_argument("--level", type=int, default=10, help="Zstandard compression level (1-19)")
+    export_p.add_argument("--since", help="Baseline timestamp for incremental update (ISO format)")
+    export_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
+
     args = parser.parse_args()
 
     if args.command == "stats":
@@ -172,6 +186,48 @@ def main() -> None:
                 status = "✓" if s["enabled"] else "✗"
                 print(f"  [{status}] {s['term']:<8} → {s['expansion']}")
             print("-" * 50 + "\n")
+    elif args.command == "export":
+        from .export.exporter import ExportManager
+        db = DatabaseManager(args.db)
+        exp_mgr = ExportManager(db)
+
+        # Print preview before export
+        preview = exp_mgr.get_database_size_preview()
+        print("\n" + "=" * 60)
+        print("         PORTABLE DATABASE EXPORT PREVIEW")
+        print("=" * 60)
+        print(f"  Source Database Size:  {format_bytes(preview['actual_db_size'])}")
+        print(f"  Valid Documents:       {preview['total_documents']:,}")
+        print(f"  Indexed Paragraphs:    {preview['total_paragraphs']:,}")
+        print(f"  Extracted Text Size:   {format_bytes(preview['extracted_text_size'])}")
+        print(f"  Package Type:          {args.type.upper()}")
+        print(f"  Zstandard Compressed:  {'YES (Level ' + str(args.level) + ')' if args.compress else 'NO'}")
+        print(f"  Destination Path:      {args.output}")
+        print("=" * 60)
+
+        out_path = Path(args.output)
+        if args.type == "search-only":
+            res = exp_mgr.export_search_only_database(out_path, compress=args.compress, compression_level=args.level)
+        elif args.type == "full":
+            res = exp_mgr.export_full_database(out_path, compress=args.compress, compression_level=args.level)
+        else:
+            since = args.since or "2000-01-01"
+            res = exp_mgr.export_incremental_package(out_path, since_date=since, compress=args.compress, compression_level=args.level)
+
+        final_sz = format_bytes(res.compressed_size or res.uncompressed_size)
+        orig_sz = format_bytes(res.uncompressed_size)
+
+        print("\n" + "=" * 60)
+        print("               EXPORT COMPLETED")
+        print("=" * 60)
+        print(f"  Exported File:         {res.output_path}")
+        print(f"  Uncompressed Size:     {orig_sz}")
+        print(f"  Final File Size:       {final_sz} ({res.compression_ratio_str})")
+        print(f"  Documents:             {res.total_documents:,}")
+        print(f"  Paragraphs:            {res.total_paragraphs:,}")
+        print(f"  Execution Time:        {res.execution_time_ms:.1f} ms")
+        print(f"  SHA-256 Checksum:      {res.sha256_checksum}")
+        print("=" * 60 + "\n")
     else:
         parser.print_help()
 

@@ -15,6 +15,7 @@ from PySide6.QtGui import QFont, QIcon
 
 from .dashboard_widget import DashboardWidget
 from .search_tab import SearchTab
+from .export_dialog import ExportDialog
 from .worker import IndexerWorker
 from ..engine.indexer_engine import IndexerEngine
 from ..models import DashboardStats, ExtractedDocument
@@ -125,12 +126,17 @@ class MainWindow(QMainWindow):
 
         # Secondary Actions
         sec_btn_layout = QHBoxLayout()
+        self.btn_export_db = QPushButton("Export Portable DB...")
+        self.btn_export_db.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold;")
+        self.btn_export_db.clicked.connect(self._open_export_dialog)
+
         self.btn_retry_failed = QPushButton("Retry Failed Documents")
         self.btn_retry_failed.clicked.connect(self._retry_failed)
 
         self.btn_clear_db = QPushButton("Reset Database")
         self.btn_clear_db.clicked.connect(self._clear_database)
 
+        sec_btn_layout.addWidget(self.btn_export_db)
         sec_btn_layout.addWidget(self.btn_retry_failed)
         sec_btn_layout.addWidget(self.btn_clear_db)
         control_layout.addLayout(sec_btn_layout)
@@ -191,6 +197,10 @@ class MainWindow(QMainWindow):
         # 5. Status Bar with Dependency Checks
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+
+    def _open_export_dialog(self) -> None:
+        dialog = ExportDialog(self.engine.db, self)
+        dialog.exec()
 
     def _check_dependencies(self) -> None:
         """Check availability of external conversion and OCR dependencies."""
