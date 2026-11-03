@@ -136,7 +136,7 @@ sudo apt install -y tesseract-ocr tesseract-ocr-hin fonts-deva fonts-noto-core
 
 ### Method A: 1-Click Launcher (Linux)
 
-A launcher script is included that handles venv creation, packages, and smart display detection:
+A launcher script is included that handles venv creation, packages, and smart display / CPU detection:
 
 1. Open terminal and navigate to the repository:
    ```bash
@@ -152,8 +152,20 @@ A launcher script is included that handles venv creation, packages, and smart di
    ```bash
    ./run_indexer.sh
    ```
-   - **With Desktop/Display (Ubuntu Desktop, XRDP, VNC)**: Launches the PySide6 Graphical Desktop GUI.
-   - **Headless SSH (No Display)**: Displays a helpful notice and launches the CLI interface automatically.
+   - **Compatible Desktop (Ubuntu Desktop, XRDP, VNC with SSE4.2/POPCNT)**: Launches the PySide6 Graphical Desktop GUI.
+   - **Virtual Machines / Cloud Instances (without SSE4.2/POPCNT)**: Automatically detects processor requirements and launches the browser **Web Dashboard** at `http://localhost:8080/` without crashing!
+   - **Headless SSH (No Display)**: Launches the Web Dashboard or terminal CLI mode automatically.
+
+4. To explicitly launch the Web Dashboard or CLI anytime:
+   ```bash
+   # Launch Web Dashboard
+   ./run_indexer.sh --web
+   
+   # Or run CLI commands
+   ./run_indexer.sh stats
+   ./run_indexer.sh scan sample_corpus/
+   ./run_indexer.sh search "bifurcation stent" --synonyms
+   ```
 
 ---
 
@@ -367,14 +379,34 @@ python -m indexer.cli clear --force
   - On Windows: Install Tesseract to `C:\Program Files\Tesseract-OCR\tesseract.exe`.
   - On Linux: Run `sudo apt install -y tesseract-ocr tesseract-ocr-hin`.
 
-### Q4: GUI fails to start on Linux cloud server (`cannot connect to X server`)
+### Q4: Incompatible processor (`This Qt build requires the following features: sse4.2 popcnt`)
+- **Cause**: Modern Qt 6.8+ and PySide6 enforce `x86-64-v2` processor features (`SSE4.2` and `POPCNT`). This happens when running inside a Virtual Machine (e.g. QEMU, KVM, Proxmox, VirtualBox) where the virtual CPU model is set to generic (e.g. `kvm64` or `qemu64`) rather than passing through host CPU capabilities.
+- **Fix (Option A — Instant)**: Run the built-in **Web Dashboard**! The Web Dashboard gives you the exact same full graphical interface in any web browser without needing Qt or SSE4.2:
+  ```bash
+  ./run_indexer.sh --web
+  # Or:
+  python -m indexer.web --port 8080
+  ```
+  Then open `http://localhost:8080` in your web browser.
+- **Fix (Option B — Terminal CLI)**: Run commands directly via CLI:
+  ```bash
+  ./run_indexer.sh stats
+  ./run_indexer.sh scan sample_corpus/
+  ./run_indexer.sh search "stent" --synonyms
+  ```
+- **Fix (Option C — Enable CPU Host Passthrough in your VM)**:
+  - If using KVM/QEMU: Set CPU type to `-cpu host` instead of `kvm64`.
+  - If using Proxmox: Set Processor type to `host`.
+  - If using VirtualBox: Ensure nested hardware virtualization / VT-x is enabled.
+
+### Q5: GUI fails to start on Linux cloud server (`cannot connect to X server`)
 - **Cause**: Linux remote session has no active display (`$DISPLAY` is unset).
 - **Fix**:
-  - Use the CLI directly: `python -m indexer.cli stats` or `./run_indexer.sh` (which auto-detects headless mode).
+  - Run the Web Dashboard: `./run_indexer.sh --web` (opens at `http://localhost:8080`).
+  - Or use CLI directly: `python -m indexer.cli stats` or `./run_indexer.sh stats`.
   - Or use virtual display: `xvfb-run python -m indexer.main`.
-  - Or connect using a remote desktop environment like XRDP / VNC.
 
-### Q5: How do I transfer the search index to iPhone / iPad / Android?
+### Q6: How do I transfer the search index to iPhone / iPad / Android?
 - Export the database using **Search-Only + Zstandard** (`.db.zst` or `.db`).
 - Upload the file to your Google Drive or web server.
 - In the **Medical Literature Search PWA**, click **"Import Database"** and select the exported file.

@@ -14,11 +14,13 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt"}
 APP_DIR = Path(os.environ.get("MEDSEARCH_HOME", Path(__file__).resolve().parent.parent))
 DATA_DIR = APP_DIR / "data"
 LOGS_DIR = APP_DIR / "logs"
+EXPORTS_DIR = DATA_DIR / "exports"
 DEFAULT_DB_PATH = DATA_DIR / "medical_search.db"
 
 # Ensure data and log directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # OCR Configuration
 DEFAULT_OCR_LANGUAGES = "eng+hin"
