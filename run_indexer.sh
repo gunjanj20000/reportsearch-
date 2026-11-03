@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================
-#      Medical Literature Search - Linux Launcher
+#      Universal Document Search - Linux Launcher
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "============================================================"
-echo "     Medical Literature Search - Linux Indexer"
+echo "     Universal Document Search - Linux Indexer"
 echo "============================================================"
 echo ""
 

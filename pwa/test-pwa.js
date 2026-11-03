@@ -1,22 +1,28 @@
 import assert from 'node:assert';
-import { expandCardiologyQuery, DEFAULT_CARDIOLOGY_SYNONYMS } from './src/services/sqlite/synonyms.ts';
+import { expandQueryWithSynonyms } from './src/services/sqlite/synonyms.ts';
 import { parseFtsQuery } from './src/services/sqlite/queryParser.ts';
 
 console.log('Testing PWA Services (Node.js test suite)...');
 
-// 1. Test Cardiology Synonyms
-const synRes1 = expandCardiologyQuery('CTO');
+// 1. Test Document Synonym Expansion with dynamic dictionary
+const testSynonyms = {
+  CTO: 'Chronic Total Occlusion',
+  LM: 'Left Main',
+  IVUS: 'Intravascular Ultrasound'
+};
+
+const synRes1 = expandQueryWithSynonyms('CTO', testSynonyms);
 assert.strictEqual(synRes1.expandedQuery, '("CTO" OR "Chronic Total Occlusion")');
 assert.strictEqual(synRes1.synonymsApplied.length, 1);
 assert.strictEqual(synRes1.synonymsApplied[0].term, 'CTO');
-console.log('✔ Cardiology synonym acronym expansion: CTO -> Chronic Total Occlusion');
+console.log('✔ Document synonym acronym expansion: CTO -> Chronic Total Occlusion');
 
-const synRes2 = expandCardiologyQuery('Left Main');
+const synRes2 = expandQueryWithSynonyms('Left Main', testSynonyms);
 assert.strictEqual(synRes2.expandedQuery, '("Left Main" OR "LM")');
 assert.strictEqual(synRes2.synonymsApplied[0].term, 'Left Main');
-console.log('✔ Reverse cardiology expansion: Left Main -> LM');
+console.log('✔ Reverse synonym expansion: Left Main -> LM');
 
-const synRes3 = expandCardiologyQuery('"CTO" AND IVUS');
+const synRes3 = expandQueryWithSynonyms('"CTO" AND IVUS', testSynonyms);
 assert(synRes3.expandedQuery.includes('"CTO"'));
 assert(synRes3.expandedQuery.includes('("IVUS" OR "Intravascular Ultrasound")'));
 console.log('✔ Quoted terms preserved during synonym expansion');
@@ -44,20 +50,20 @@ import('./node_modules/@sqlite.org/sqlite-wasm/sqlite-wasm/jswasm/sqlite3-node.m
   const db = new sqlite3.oo1.DB();
   db.exec(`
     CREATE VIRTUAL TABLE test_fts USING fts5(title, content, tokenize = 'unicode61');
-    INSERT INTO test_fts VALUES('CTO Study', 'Evaluating Chronic Total Occlusion with IVUS.');
-    INSERT INTO test_fts VALUES('TAVR Registry', 'Transcatheter Aortic Valve Replacement outcomes.');
+    INSERT INTO test_fts VALUES('Document 1', 'Evaluating technical specification report with details.');
+    INSERT INTO test_fts VALUES('Document 2', 'Annual performance review and financial analysis.');
   `);
 
   const results = [];
   db.exec({
-    sql: "SELECT title, snippet(test_fts, -1, '<mark>', '</mark>', '...', 10) as snip, bm25(test_fts) as rank FROM test_fts WHERE test_fts MATCH 'CTO' ORDER BY rank ASC;",
+    sql: "SELECT title, snippet(test_fts, -1, '<mark>', '</mark>', '...', 10) as snip, bm25(test_fts) as rank FROM test_fts WHERE test_fts MATCH 'specification' ORDER BY rank ASC;",
     rowMode: 'object',
     callback: (r) => results.push(r)
   });
 
   assert.strictEqual(results.length, 1);
-  assert.strictEqual(results[0].title, 'CTO Study');
-  assert(results[0].snip.includes('<mark>CTO</mark>'));
+  assert.strictEqual(results[0].title, 'Document 1');
+  assert(results[0].snip.includes('<mark>specification</mark>'));
   console.log('✔ SQLite WASM FTS5 BM25 search & snippet highlighting');
   db.close();
 

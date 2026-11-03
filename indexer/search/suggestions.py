@@ -23,7 +23,7 @@ class SuggestionService:
         suggestions: List[Dict[str, Any]] = []
         seen_texts = set()
 
-        # 1. Cardiology Synonyms match
+        # 1. Document Synonyms match
         try:
             syn_rows = self.conn.execute(
                 """

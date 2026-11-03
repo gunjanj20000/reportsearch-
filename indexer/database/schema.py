@@ -73,12 +73,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 -- FTS5 Vocabulary table for instant auto-complete and search suggestions
 CREATE VIRTUAL TABLE IF NOT EXISTS search_vocab USING fts5vocab(search_index, 'row');
 
--- Cardiology and medical synonym dictionary table
+-- Document synonym and acronym dictionary table
 CREATE TABLE IF NOT EXISTS synonyms (
     synonym_id INTEGER PRIMARY KEY AUTOINCREMENT,
     term TEXT NOT NULL UNIQUE,
     expansion TEXT NOT NULL,
-    category TEXT DEFAULT 'cardiology',
+    category TEXT DEFAULT 'general',
     enabled INTEGER DEFAULT 1
 );
 

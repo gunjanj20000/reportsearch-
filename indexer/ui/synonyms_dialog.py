@@ -1,4 +1,4 @@
-"""Dialog for viewing, adding, editing, and deleting cardiology synonyms."""
+"""Dialog for viewing, adding, editing, and deleting document synonyms."""
 
 from __future__ import annotations
 import sqlite3
@@ -12,11 +12,11 @@ from ..search.synonyms import SynonymManager
 
 
 class SynonymsDialog(QDialog):
-    """User-facing dialog to view and manage cardiology and medical synonym dictionary."""
+    """User-facing dialog to view and manage document synonym dictionary."""
 
     def __init__(self, conn: sqlite3.Connection, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Cardiology Synonym Dictionary")
+        self.setWindowTitle("Document Synonym Dictionary")
         self.resize(650, 480)
         self.conn = conn
         self.manager = SynonymManager(self.conn)
@@ -30,8 +30,8 @@ class SynonymsDialog(QDialog):
         layout.setSpacing(12)
 
         desc = QLabel(
-            "Cardiology abbreviations and synonyms used for optional query expansion.\n"
-            "Enable, disable, or add custom clinical terms below:"
+            "Document abbreviations and synonyms used for optional query expansion.\n"
+            "Enable, disable, or add custom terms below:"
         )
         desc.setStyleSheet("color: #475569;")
         layout.addWidget(desc)

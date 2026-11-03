@@ -20,15 +20,15 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center space-x-2.5">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-sky-500 to-teal-400 p-0.5 flex items-center justify-center shadow-lg shadow-sky-500/20">
             <div className="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center">
-              <span className="text-sky-400 font-bold text-lg leading-none">⚕</span>
+              <span className="text-sky-400 font-bold text-lg leading-none">📑</span>
             </div>
           </div>
           <div>
             <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-1.5">
-              MedSearch <span className="text-xs px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-400 font-medium border border-sky-500/20">PWA</span>
+              DocSearch <span className="text-xs px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-400 font-medium border border-sky-500/20">PWA</span>
             </h1>
             <p className="text-[11px] text-slate-400 hidden sm:block">
-              Offline Interventional Cardiology Full-Text Search
+              Offline Universal Document Full-Text Search
             </p>
           </div>
         </div>

@@ -197,7 +197,7 @@ class SearchTab(QWidget):
         # 2. Options and Filters Row
         opt_layout = QHBoxLayout()
 
-        self.chk_synonyms = QCheckBox("Cardiology Synonym Expansion (LM ↔ Left Main, CTO ↔ Chronic Total Occlusion, etc.)")
+        self.chk_synonyms = QCheckBox("Expand Synonyms & Acronyms (e.g. AI ↔ Artificial Intelligence)")
         self.chk_synonyms.setChecked(True)
         opt_layout.addWidget(self.chk_synonyms)
 

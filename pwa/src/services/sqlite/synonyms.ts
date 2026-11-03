@@ -1,48 +1,28 @@
 /**
- * Cardiology Synonym Dictionary and Transparent Query Expansion Engine.
- * Matches the Phase 2 interventional cardiology terminology.
+ * Document Synonym Dictionary and Transparent Query Expansion Engine.
+ * Dynamically expands abbreviations and terms based on active database synonyms.
  */
 
-export const DEFAULT_CARDIOLOGY_SYNONYMS: Record<string, string> = {
-  LM: 'Left Main',
-  CTO: 'Chronic Total Occlusion',
-  ELCA: 'Excimer Laser Coronary Atherectomy',
-  IVUS: 'Intravascular Ultrasound',
-  OCT: 'Optical Coherence Tomography',
-  IVL: 'Intravascular Lithotripsy',
-  ISR: 'In-Stent Restenosis',
-  TAVI: 'Transcatheter Aortic Valve Implantation',
-  TAVR: 'Transcatheter Aortic Valve Replacement',
-  CABG: 'Coronary Artery Bypass Grafting',
-  PCI: 'Percutaneous Coronary Intervention',
-  FFR: 'Fractional Flow Reserve',
-  iFR: 'Instantaneous Wave-Free Ratio',
-  DES: 'Drug-Eluting Stent',
-  BMS: 'Bare-Metal Stent',
-  DCB: 'Drug-Coated Balloon',
-  MLA: 'Minimum Lumen Area',
-  MSA: 'Minimal Stent Area',
-  EEL: 'External Elastic Lamina',
-  LAD: 'Left Anterior Descending',
-  LCx: 'Left Circumflex',
-  RCA: 'Right Coronary Artery',
-  TCFA: 'Thin-Cap Fibroatheroma',
-  MACE: 'Major Adverse Cardiac Events',
-  DAPT: 'Dual Antiplatelet Therapy',
-};
+export const DEFAULT_CARDIOLOGY_SYNONYMS: Record<string, string> = {};
+export const DEFAULT_SYNONYMS: Record<string, string> = {};
 
-// Build reverse map for full terms back to acronyms
-const REVERSE_MAP: Record<string, string> = {};
-for (const [acronym, full] of Object.entries(DEFAULT_CARDIOLOGY_SYNONYMS)) {
-  REVERSE_MAP[full.toUpperCase()] = acronym;
-}
-
-export function expandCardiologyQuery(query: string): {
+export function expandQueryWithSynonyms(
+  query: string,
+  synonymsMap: Record<string, string> = DEFAULT_SYNONYMS
+): {
   expandedQuery: string;
   synonymsApplied: Array<{ term: string; expansion: string }>;
 } {
   const clean = query.trim();
-  if (!clean) return { expandedQuery: clean, synonymsApplied: [] };
+  if (!clean || Object.keys(synonymsMap).length === 0) {
+    return { expandedQuery: clean, synonymsApplied: [] };
+  }
+
+  // Reverse mapping for expansion -> acronym
+  const reverseMap: Record<string, string> = {};
+  for (const [acronym, full] of Object.entries(synonymsMap)) {
+    reverseMap[full.toUpperCase()] = acronym;
+  }
 
   const tokens = clean.match(/"[^"]+"|\b[\w-]+\b|[^\s\w"-]/g) || [clean];
   const applied: Array<{ term: string; expansion: string }> = [];
@@ -52,22 +32,22 @@ export function expandCardiologyQuery(query: string): {
   while (i < tokens.length) {
     const token = tokens[i];
 
-    // Skip quoted phrases or boolean keywords
+    // Skip quoted phrases or boolean operators
     if (token.startsWith('"') || ['AND', 'OR', 'NOT', 'NEAR'].includes(token.toUpperCase())) {
       parts.push(token);
       i++;
       continue;
     }
 
-    // Try multi-word phrases (3 words, then 2 words)
+    // Check multi-word phrases (up to 4 words)
     let matchedMulti = false;
     for (const lookahead of [4, 3, 2]) {
       if (i + lookahead <= tokens.length) {
         const candidatePhrase = tokens.slice(i, i + lookahead).join(' ');
         const upper = candidatePhrase.toUpperCase();
 
-        if (REVERSE_MAP[upper]) {
-          const acronym = REVERSE_MAP[upper];
+        if (reverseMap[upper]) {
+          const acronym = reverseMap[upper];
           parts.push(`("${candidatePhrase}" OR "${acronym}")`);
           applied.push({ term: candidatePhrase, expansion: acronym });
           i += lookahead;
@@ -78,10 +58,10 @@ export function expandCardiologyQuery(query: string): {
     }
     if (matchedMulti) continue;
 
-    // Single word check
+    // Single token check
     const upperToken = token.toUpperCase();
-    if (DEFAULT_CARDIOLOGY_SYNONYMS[upperToken]) {
-      const full = DEFAULT_CARDIOLOGY_SYNONYMS[upperToken];
+    if (synonymsMap[upperToken]) {
+      const full = synonymsMap[upperToken];
       parts.push(`("${token}" OR "${full}")`);
       applied.push({ term: token, expansion: full });
       i++;
@@ -96,4 +76,14 @@ export function expandCardiologyQuery(query: string): {
     expandedQuery: parts.join(' '),
     synonymsApplied: applied,
   };
+}
+
+export function expandCardiologyQuery(
+  query: string,
+  synonymsMap: Record<string, string> = DEFAULT_CARDIOLOGY_SYNONYMS
+): {
+  expandedQuery: string;
+  synonymsApplied: Array<{ term: string; expansion: string }>;
+} {
+  return expandQueryWithSynonyms(query, synonymsMap);
 }

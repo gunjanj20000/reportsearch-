@@ -60,7 +60,7 @@ def test_web_index_html(web_server):
         assert resp.status == 200
         assert "text/html" in resp.headers.get("Content-Type")
         html = resp.read().decode("utf-8")
-        assert "Medical Literature Search" in html
+        assert "Universal Document Search" in html
         assert "mTotalDocs" in html
 
 
@@ -104,7 +104,7 @@ def test_api_synonyms_list(web_server):
         assert resp.status == 200
         data = json.loads(resp.read().decode("utf-8"))
         assert "synonyms" in data
-        assert len(data["synonyms"]) > 0
+        assert isinstance(data["synonyms"], list)
 
 
 def test_api_export_preview(web_server):
@@ -258,13 +258,20 @@ def test_pwa_manifest_and_sw(web_server):
 
 def test_compact_database_download(web_server):
     """Test /exports/medical_search_compact.db.zst endpoint serves the compressed database."""
-    with urllib.request.urlopen(f"{web_server}/exports/medical_search_compact.db.zst") as resp:
-        assert resp.status == 200
-        assert resp.headers.get("Content-Type") == "application/zstd"
-        data = resp.read()
-        assert len(data) > 1000
-        # Zstandard magic bytes
-        assert data[:4] == b"\x28\xb5\x2f\xfd"
+    exports_dir = Path(__file__).resolve().parent.parent / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    test_zst = exports_dir / "medical_search_compact.db.zst"
+    test_zst.write_bytes(b"\x28\xb5\x2f\xfd" + b"\x00" * 1024)
+    try:
+        with urllib.request.urlopen(f"{web_server}/exports/medical_search_compact.db.zst") as resp:
+            assert resp.status == 200
+            assert resp.headers.get("Content-Type") == "application/zstd"
+            data = resp.read()
+            assert len(data) >= 1024
+            assert data[:4] == b"\x28\xb5\x2f\xfd"
+    finally:
+        if test_zst.exists():
+            test_zst.unlink()
 
 
 def test_api_document_mini_page_metadata(web_server):

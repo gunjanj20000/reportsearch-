@@ -12,7 +12,7 @@ import {
   isOpfsSupported,
 } from '../storage/opfs';
 import { parseFtsQuery } from './queryParser';
-import { expandCardiologyQuery } from './synonyms';
+import { expandQueryWithSynonyms, expandCardiologyQuery } from './synonyms';
 import type {
   SearchResultItem,
   SearchResponse,
@@ -28,6 +28,25 @@ class SqliteService {
   private storageType: 'opfs' | 'idb' | 'memory' = 'memory';
   private currentDbFilename: string = DEFAULT_DB_FILENAME;
   private initPromise: Promise<void> | null = null;
+  public activeSynonyms: Record<string, string> = {};
+
+  private loadSynonymsFromDb(): void {
+    this.activeSynonyms = {};
+    if (!this.db) return;
+    try {
+      this.db.exec({
+        sql: "SELECT term, expansion FROM synonyms WHERE enabled = 1;",
+        rowMode: "object",
+        callback: (row: any) => {
+          if (row.term && row.expansion) {
+            this.activeSynonyms[String(row.term).toUpperCase()] = String(row.expansion);
+          }
+        }
+      });
+    } catch {
+      // synonyms table might not exist
+    }
+  }
 
   public async init(): Promise<void> {
     if (this.db) return;
@@ -108,6 +127,7 @@ class SqliteService {
 
       this.db = newDb;
       this.storageType = storageType;
+      this.loadSynonymsFromDb();
       console.log(`[SQLite WASM] Successfully loaded database via ${storageType}.`);
     } catch (err) {
       console.error('[SQLite WASM] Failed to deserialize database bytes:', err);
@@ -154,12 +174,12 @@ class SqliteService {
   }
 
   /**
-   * Load the built-in compact cardiology database bundled with the PWA.
+   * Sync latest database export from Desktop Indexer server.
    */
   public async loadBuiltInDatabase(onProgress?: (percent: number) => void): Promise<DatabaseStats> {
     await this.init();
 
-    const candidates = ['./medical_search_compact.db.zst', './medical_search_compact.db'];
+    const candidates = ['/api/db/compact.zst', '/api/db/compact.db', './medical_search_compact.db.zst', './medical_search_compact.db'];
     let resp: Response | null = null;
     let chosenUrl = '';
 
@@ -177,7 +197,7 @@ class SqliteService {
     }
 
     if (!resp) {
-      throw new Error('Built-in database file not found on server.');
+      throw new Error('No database export found on server. On your desktop indexer dashboard, click "Export for Mobile" first.');
     }
 
     const contentLength = Number(resp.headers.get('content-length')) || 215000;
@@ -242,8 +262,8 @@ class SqliteService {
     let targetQuery = cleanQuery;
     let synonymsApplied: Array<{ term: string; expansion: string }> = [];
 
-    if (filters.expandSynonyms) {
-      const expResult = expandCardiologyQuery(cleanQuery);
+    if (filters.expandSynonyms && Object.keys(this.activeSynonyms).length > 0) {
+      const expResult = expandQueryWithSynonyms(cleanQuery, this.activeSynonyms);
       targetQuery = expResult.expandedQuery;
       synonymsApplied = expResult.synonymsApplied;
     }
@@ -520,6 +540,7 @@ class SqliteService {
     }
     await deleteDatabaseFromStorage(this.currentDbFilename);
     this.storageType = 'memory';
+    this.activeSynonyms = {};
     console.log('[SQLite WASM] Database deleted from OPFS and state cleared.');
   }
 }

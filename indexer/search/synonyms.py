@@ -1,4 +1,4 @@
-"""Cardiology Synonym Dictionary and Query Expansion Engine."""
+"""Synonym Dictionary and Query Expansion Engine."""
 
 from __future__ import annotations
 import re
@@ -6,55 +6,20 @@ import sqlite3
 from typing import Dict, List, Optional, Tuple
 
 
-DEFAULT_CARDIOLOGY_SYNONYMS: Dict[str, str] = {
-    "LM": "Left Main",
-    "CTO": "Chronic Total Occlusion",
-    "ELCA": "Excimer Laser Coronary Atherectomy",
-    "IVUS": "Intravascular Ultrasound",
-    "OCT": "Optical Coherence Tomography",
-    "IVL": "Intravascular Lithotripsy",
-    "ISR": "In-Stent Restenosis",
-    "TAVI": "Transcatheter Aortic Valve Implantation",
-    "TAVR": "Transcatheter Aortic Valve Replacement",
-    "CABG": "Coronary Artery Bypass Grafting",
-    "PCI": "Percutaneous Coronary Intervention",
-    "FFR": "Fractional Flow Reserve",
-    "iFR": "Instantaneous Wave-Free Ratio",
-    "DES": "Drug-Eluting Stent",
-    "BMS": "Bare-Metal Stent",
-    "DCB": "Drug-Coated Balloon",
-    "MLA": "Minimum Lumen Area",
-    "MSA": "Minimal Stent Area",
-    "EEL": "External Elastic Lamina",
-    "LAD": "Left Anterior Descending",
-    "LCx": "Left Circumflex",
-    "RCA": "Right Coronary Artery",
-    "TCFA": "Thin-Cap Fibroatheroma",
-    "MACE": "Major Adverse Cardiac Events",
-    "DAPT": "Dual Antiplatelet Therapy",
-}
+DEFAULT_CARDIOLOGY_SYNONYMS: Dict[str, str] = {}
+DEFAULT_SYNONYMS: Dict[str, str] = {}
 
 
 def seed_default_synonyms(conn: sqlite3.Connection) -> None:
-    """Populate default cardiology synonyms if the synonyms table is empty."""
-    count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
-    if count == 0:
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO synonyms (term, expansion, category, enabled)
-            VALUES (?, ?, 'cardiology', 1)
-            """,
-            list(DEFAULT_CARDIOLOGY_SYNONYMS.items())
-        )
-        conn.commit()
+    """No-op: database is kept clean for all-document search without forced cardiology presets."""
+    pass
 
 
 class SynonymManager:
-    """Manages database-backed cardiology synonyms and user extensions."""
+    """Manages database-backed document synonyms, acronyms, and user extensions."""
 
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
-        seed_default_synonyms(self.conn)
 
     def get_all(self) -> List[dict]:
         """Fetch all synonyms with enabled state."""
@@ -68,14 +33,14 @@ class SynonymManager:
         rows = self.conn.execute(
             "SELECT term, expansion FROM synonyms WHERE enabled = 1"
         ).fetchall()
-        # Also map both ways (e.g. LM -> Left Main and Left Main -> LM)
+        # Also map both ways (e.g. term -> expansion and expansion -> term)
         result = {}
         for r in rows:
             result[r["term"].upper()] = r["expansion"]
             result[r["expansion"].upper()] = r["term"]
         return result
 
-    def add(self, term: str, expansion: str, category: str = "cardiology") -> int:
+    def add(self, term: str, expansion: str, category: str = "general") -> int:
         """Add a new custom synonym."""
         cur = self.conn.execute(
             "INSERT INTO synonyms (term, expansion, category, enabled) VALUES (?, ?, ?, 1)",

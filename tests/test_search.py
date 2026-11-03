@@ -60,6 +60,10 @@ def populated_search_service():
         db.save_document(doc2)
 
         service = db.get_search_service()
+        service.synonym_manager.add("LM", "Left Main")
+        service.synonym_manager.add("CTO", "Chronic Total Occlusion")
+        service.synonym_manager.add("OCT", "Optical Coherence Tomography")
+        service.synonym_manager.add("IVUS", "Intravascular Ultrasound")
         yield service
         db.close()
 
@@ -92,6 +96,8 @@ def test_synonym_expansion():
     with tempfile.TemporaryDirectory() as tmp_dir:
         db = DatabaseManager(Path(tmp_dir) / "syn_test.db")
         syn_mgr = db.get_search_service().synonym_manager
+        syn_mgr.add("LM", "Left Main")
+        syn_mgr.add("CTO", "Chronic Total Occlusion")
 
         # Test single acronym expansion
         expanded, used = syn_mgr.expand_query("LM")

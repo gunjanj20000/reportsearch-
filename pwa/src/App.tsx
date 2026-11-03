@@ -64,12 +64,6 @@ export const App: React.FC = () => {
         const currentStats = await sqliteService.getStats();
         if (mounted) {
           setStats(currentStats);
-          // If no database in OPFS yet, auto-load built-in demo database
-          if (!currentStats.is_loaded) {
-            console.log('[App] Auto-loading bundled cardiology database into OPFS...');
-            const loaded = await sqliteService.loadBuiltInDatabase();
-            if (mounted) setStats(loaded);
-          }
         }
       } catch (err) {
         console.error('[App] SQLite WASM init error:', err);

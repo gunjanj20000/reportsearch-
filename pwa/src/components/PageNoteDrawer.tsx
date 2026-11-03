@@ -294,7 +294,7 @@ export const PageNoteDrawer: React.FC<PageNoteDrawerProps> = ({
             <div>
               <div className="flex items-center justify-between border-b-1.5 border-slate-900 pb-2 mb-6 text-[10px] sm:text-xs font-semibold text-slate-600 tracking-wider">
                 <div className="flex items-center space-x-2 truncate">
-                  <span className="text-sky-700 font-bold">🫀 CLINICAL ARCHIVE</span>
+                  <span className="text-sky-700 font-bold">📄 DOCUMENT ARCHIVE</span>
                   <span className="text-slate-400">•</span>
                   <span className="truncate">{data.filename.toUpperCase()}</span>
                 </div>
@@ -313,7 +313,7 @@ export const PageNoteDrawer: React.FC<PageNoteDrawerProps> = ({
               <span className="font-bold text-slate-900">
                 — Page {data.page_number} of {data.total_pages} —
               </span>
-              <span>CONFIDENTIAL</span>
+              <span>DOCUMENT PREVIEW</span>
             </div>
           </div>
         </div>

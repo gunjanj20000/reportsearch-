@@ -31,7 +31,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({
     try {
       setLoading(true);
       setErrorMsg(null);
-      setStatusMsg('Downloading & decompressing built-in cardiology database...');
+      setStatusMsg('Syncing database from Desktop Indexer server...');
       await onLoadDemo((pct) => setProgress(pct));
       setStatusMsg('Database initialized successfully in OPFS!');
       setTimeout(() => {
@@ -39,7 +39,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({
         setProgress(null);
       }, 2500);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to load demo database.');
+      setErrorMsg(err.message || 'Failed to sync database from server.');
     } finally {
       setLoading(false);
     }
@@ -186,7 +186,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({
             </div>
           )}
 
-          {/* Action 1: 1-Tap Load Built-in Demo DB */}
+          {/* Action 1: Sync from Server Indexer */}
           <div className="space-y-2">
             <button
               onClick={handleDemoClick}
@@ -198,10 +198,10 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({
               ) : (
                 <Download className="w-4 h-4" />
               )}
-              <span>1-Tap Load Built-in Cardiology Database</span>
+              <span>Sync Latest Database from Desktop Indexer</span>
             </button>
             <p className="text-[11px] text-slate-400 text-center">
-              Bundles 147 clinical trial documents (206 KB compressed via Zstandard).
+              Fetches latest indexed documents from running desktop server.
             </p>
           </div>
 
@@ -220,7 +220,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({
               className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-slate-200 font-semibold text-xs active:scale-98 transition-all disabled:opacity-50"
             >
               <Upload className="w-4 h-4 text-sky-400" />
-              <span>Import Custom Database (.db or .db.zst)</span>
+              <span>Import Document Database (.db or .db.zst)</span>
             </button>
           </div>
 

@@ -50,7 +50,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
           type="search"
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
-          placeholder="Search literature, clinical trials, CTO, stents..."
+          placeholder="Search all documents (PDF, Word, TXT, Archives)..."
           className="w-full pl-11 pr-10 py-3.5 bg-slate-900 border border-slate-700/80 rounded-2xl text-slate-100 placeholder-slate-400 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500 transition-all shadow-inner"
           autoComplete="off"
           autoCorrect="off"
@@ -67,7 +67,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
         )}
       </div>
 
-      {/* Cardiology Synonym Expansion Toggle */}
+      {/* Synonym Expansion Toggle */}
       <div className="flex items-center justify-between px-1 py-0.5 text-xs">
         <button
           type="button"
@@ -77,10 +77,10 @@ export const SearchBar: React.FC<SearchBarProps> = ({
               ? 'bg-sky-500/15 border-sky-400/40 text-sky-300 font-medium shadow-sm shadow-sky-500/10'
               : 'bg-slate-800/70 border-slate-700/70 text-slate-400 hover:text-slate-300'
           }`}
-          title="Expand clinical acronyms: CTO ↔ Chronic Total Occlusion, LM ↔ Left Main, IVUS, etc."
+          title="Expand configured abbreviations and synonyms"
         >
           <Sparkles className={`w-3.5 h-3.5 ${expandSynonyms ? 'text-sky-400' : 'text-slate-400'}`} />
-          <span>Cardiology Synonyms</span>
+          <span>Synonym Expansion</span>
           <span
             className={`w-2 h-2 rounded-full ${
               expandSynonyms ? 'bg-sky-400 animate-pulse' : 'bg-slate-600'

@@ -32,10 +32,10 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
         </div>
         <div>
           <h3 className="text-base font-semibold text-slate-200">
-            Instant Offline Literature Search
+            Instant Offline Document Search
           </h3>
           <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-            Search clinical guidelines, trials, interventional cardiology case reports, and protocols directly in your browser.
+            Search indexed documents, reports, manuals, PDFs, Word files, and archives directly in your browser.
           </p>
         </div>
       </div>
@@ -48,9 +48,9 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
         <div className="w-12 h-12 mx-auto rounded-2xl bg-slate-800/50 flex items-center justify-center text-slate-400">
           <FileText className="w-6 h-6" />
         </div>
-        <h3 className="text-sm font-semibold text-slate-200">No matching literature found</h3>
+        <h3 className="text-sm font-semibold text-slate-200">No matching documents found</h3>
         <p className="text-xs text-slate-400">
-          Try expanding terms with the Cardiology Synonyms toggle, checking spelling, or using quotes for exact phrases like <span className="text-sky-300 font-mono">"left main"</span>.
+          Try adjusting keywords, checking spelling, or using quotes for exact phrases like <span className="text-sky-300 font-mono">"annual report"</span>.
         </p>
       </div>
     );

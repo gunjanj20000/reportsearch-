@@ -17,7 +17,7 @@ def print_stats(db_path: Path | str = DEFAULT_DB_PATH) -> None:
     stats = db.get_dashboard_stats()
 
     print("\n" + "=" * 60)
-    print("      MEDICAL LITERATURE SEARCH — INDEXER DASHBOARD")
+    print("      UNIVERSAL DOCUMENT SEARCH — INDEXER DASHBOARD")
     print("=" * 60)
     print(f"  1. Total Indexed Documents:   {stats.total_documents:,}")
     print(f"  2. Total Original File Size:  {format_bytes(stats.total_original_file_size)}")
@@ -87,7 +87,7 @@ def main() -> None:
     # Search command (Phase 2)
     search_p = subparsers.add_parser("search", help="Execute FTS5 search query")
     search_p.add_argument("query", help="Search query string")
-    search_p.add_argument("--synonyms", action="store_true", help="Enable cardiology synonym expansion")
+    search_p.add_argument("--synonyms", action="store_true", help="Enable synonym expansion")
     search_p.add_argument("--ext", nargs="+", help="Filter by extensions (e.g. .pdf .docx)")
     search_p.add_argument("--page", type=int, default=1, help="Page number")
     search_p.add_argument("--limit", type=int, default=10, help="Results per page")
@@ -99,7 +99,7 @@ def main() -> None:
     suggest_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
 
     # Synonyms management command (Phase 2)
-    syn_p = subparsers.add_parser("synonyms", help="View or add cardiology synonyms")
+    syn_p = subparsers.add_parser("synonyms", help="View or add document synonyms")
     syn_p.add_argument("--add", nargs=2, metavar=("TERM", "EXPANSION"), help="Add a custom synonym")
     syn_p.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to SQLite database")
 
@@ -179,7 +179,7 @@ def main() -> None:
             print(f"Added synonym #{syn_id}: {term} → {expansion}")
         else:
             all_syns = syn_mgr.get_all()
-            print(f"\nCardiology Synonym Dictionary ({len(all_syns)} terms):")
+            print(f"\nDocument Synonym Dictionary ({len(all_syns)} terms):")
             print("-" * 50)
             for s in all_syns:
                 status = "✓" if s["enabled"] else "✗"

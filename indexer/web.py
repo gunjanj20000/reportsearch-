@@ -1,6 +1,6 @@
 """
-Self-contained, zero-dependency Web GUI and REST API for Medical Literature Search.
-Provides complete indexing, live stats, search with cardiology synonyms, and mobile database export.
+Self-contained, zero-dependency Web GUI and REST API for Universal Document Search.
+Provides complete indexing, live stats, full-text document search, and mobile database export.
 Works in any browser without requiring PySide6/Qt or GUI libraries.
 """
 
@@ -1046,7 +1046,7 @@ SPA_HTML = r"""<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Medical Literature Search — Clinical Indexer & Discovery</title>
+  <title>Universal Document Search — Desktop Dashboard</title>
   <style>
     :root {
       --primary: #0284c7;
@@ -1916,7 +1916,7 @@ SPA_HTML = r"""<!DOCTYPE html>
 <body>
 
 <header>
-  <h1>🫀 Medical Literature Search & Discovery</h1>
+  <h1>📑 Universal Document Search & Indexer</h1>
   <div style="display:flex; align-items:center; gap:12px;">
     <a href="/pwa/" target="_blank" class="pwa-header-link" title="Open Mobile Search PWA (Offline SQLite WASM + OPFS)">📱 Mobile PWA</a>
     <div class="status-badge" id="headerStatus">● Ready</div>
@@ -1952,7 +1952,7 @@ SPA_HTML = r"""<!DOCTYPE html>
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('tabIndexer')">1. Indexer & Scan</button>
     <button class="tab-btn" onclick="switchTab('tabSearch')">2. Full-Text Search</button>
-    <button class="tab-btn" onclick="switchTab('tabSynonyms')">3. Cardiology Synonyms</button>
+    <button class="tab-btn" onclick="switchTab('tabSynonyms')">3. Synonym Dictionary</button>
     <button class="tab-btn" onclick="switchTab('tabExport')">4. Mobile PWA Export</button>
   </div>
 
@@ -2009,16 +2009,16 @@ SPA_HTML = r"""<!DOCTYPE html>
   <!-- Tab 2: Search -->
   <div id="tabSearch" class="tab-content">
     <div class="card">
-      <div class="card-title">Instant Full-Text Search & Cardiology Exploration</div>
+      <div class="card-title">Instant Full-Text Document Search</div>
       <div class="search-bar">
-        <input type="text" id="searchInput" placeholder="Search literature (e.g. 'Left Main', 'CTO', 'drug eluting stent', 'litho*')..." oninput="onSearchInput()" onkeydown="if(event.key==='Enter')performSearch();">
+        <input type="text" id="searchInput" placeholder="Search documents (e.g. 'annual report', 'specifications', 'contract', 'summary*')..." oninput="onSearchInput()" onkeydown="if(event.key==='Enter')performSearch();">
         <button class="btn" onclick="performSearch()">Search</button>
         <div class="suggestions-list" id="suggestionsList"></div>
       </div>
       <div class="search-options">
         <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer;">
           <input type="checkbox" id="chkSynonyms" checked>
-          <strong>Expand Cardiology Synonyms</strong> (e.g. LM &harr; Left Main, BMS &harr; Bare-Metal Stent)
+          <strong>Expand Synonyms / Acronyms</strong> (e.g. AI &harr; Artificial Intelligence)
         </label>
         <div>
           <label>File Format: </label>
@@ -2040,18 +2040,18 @@ SPA_HTML = r"""<!DOCTYPE html>
   <!-- Tab 3: Synonyms -->
   <div id="tabSynonyms" class="tab-content">
     <div class="card">
-      <div class="card-title">Cardiology Synonym & Medical Terminology Dictionary</div>
+      <div class="card-title">Custom Synonym & Acronym Dictionary</div>
       <div style="display:flex; gap:0.5rem; margin-bottom:1.5rem; flex-wrap:wrap;">
-        <input type="text" id="newSynTerm" placeholder="Abbreviation / Term (e.g. TAVR)" style="flex:1; min-width:200px; padding:0.6rem; border:1px solid var(--border); border-radius:6px;">
-        <input type="text" id="newSynExpanded" placeholder="Full Clinical Expansion (e.g. Transcatheter Aortic Valve Replacement)" style="flex:2; min-width:280px; padding:0.6rem; border:1px solid var(--border); border-radius:6px;">
+        <input type="text" id="newSynTerm" placeholder="Term / Acronym (e.g. AI, Q1, SOW)" style="flex:1; min-width:200px; padding:0.6rem; border:1px solid var(--border); border-radius:6px;">
+        <input type="text" id="newSynExpanded" placeholder="Full Expansion / Synonyms (e.g. Statement of Work)" style="flex:2; min-width:280px; padding:0.6rem; border:1px solid var(--border); border-radius:6px;">
         <button class="btn" onclick="addSynonym()">➕ Add Synonym</button>
       </div>
 
       <table>
         <thead>
           <tr>
-            <th style="width:25%;">Cardiology Term / Abbr</th>
-            <th>Clinical Expansion / Synonyms</th>
+            <th style="width:25%;">Term / Acronym</th>
+            <th>Expansion / Synonyms</th>
           </tr>
         </thead>
         <tbody id="synonymsTableBody"></tbody>
@@ -2203,7 +2203,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         <!-- Running Header -->
         <div class="mini-page-running-header">
           <div class="running-left">
-            <span class="running-seal">🫀 CLINICAL ARCHIVE</span>
+            <span class="running-seal">📄 DOCUMENT ARCHIVE</span>
             <span class="running-doc-name" id="runningDocName">DOCUMENT</span>
           </div>
           <div class="running-right">
@@ -2221,7 +2221,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         <div class="mini-page-running-footer">
           <div class="footer-left" id="runningFooterPath">Source Path</div>
           <div class="footer-center" id="runningFooterPageCounter">— Page 1 of 1 —</div>
-          <div class="footer-right">MEDICAL RECORD</div>
+          <div class="footer-right">DOCUMENT PREVIEW</div>
         </div>
       </div>
     </div>
@@ -2910,7 +2910,7 @@ def run_web_server(host: str = "0.0.0.0", port: int = 8080, db_path: Path = DEFA
     server = ThreadingHTTPServer((host, port), MedicalSearchHandler)
     logger.info(f"Web Dashboard running at http://{host}:{port}/")
     print("\n" + "=" * 65)
-    print("      MEDICAL LITERATURE SEARCH — WEB DASHBOARD & API")
+    print("      UNIVERSAL DOCUMENT SEARCH — WEB DASHBOARD & API")
     print("=" * 65)
     print(f"  URL:           http://localhost:{port}/")
     if host == "0.0.0.0":
