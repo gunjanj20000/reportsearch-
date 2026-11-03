@@ -13,10 +13,34 @@ from indexer.config import DEFAULT_DB_PATH
 import indexer.web as web_module
 
 
+from indexer.database.connection import DatabaseManager
+from indexer.models import ExtractedDocument, ExtractedPage, ExtractedParagraph
+
 @pytest.fixture(scope="module")
-def web_server():
-    """Start web server on an ephemeral port in a daemon thread."""
-    web_module._state = WebState(DEFAULT_DB_PATH)
+def web_server(tmp_path_factory):
+    """Start web server on an ephemeral port in a daemon thread with an isolated test DB."""
+    test_db_path = tmp_path_factory.mktemp("web_test") / "test_web.db"
+    db_mgr = DatabaseManager(test_db_path)
+    # Seed 1 test document with page and paragraph
+    db_mgr.save_document(ExtractedDocument(
+        filename="Clinical_Trial_001.pdf",
+        extension=".pdf",
+        file_size=15000,
+        modified_time=1700000000.0,
+        sha256="testsha256",
+        source_path="/test_docs/Clinical_Trial_001.pdf",
+        title="Clinical Trial 001 - CTO Revascularization",
+        page_count=2,
+        pages=[
+            ExtractedPage(page_number=1, text="Chronic Total Occlusion (CTO) trial page 1 content."),
+            ExtractedPage(page_number=2, text="Left Main (LM) coronary stenting trial page 2 content.")
+        ],
+        paragraphs=[
+            ExtractedParagraph(page_number=1, paragraph_number=1, text="Chronic Total Occlusion (CTO) trial page 1 content."),
+            ExtractedParagraph(page_number=2, paragraph_number=2, text="Left Main (LM) coronary stenting trial page 2 content.")
+        ]
+    ))
+    web_module._state = WebState(test_db_path)
     server = ThreadingHTTPServer(("127.0.0.1", 0), MedicalSearchHandler)
     port = server.server_address[1]
 
@@ -159,7 +183,7 @@ def test_api_fs_network_check_valid(web_server):
     """Test /api/fs/network_check verifies and resolves existing folder."""
     req = urllib.request.Request(
         f"{web_server}/api/fs/network_check",
-        data=json.dumps({"path": "sample_corpus"}).encode("utf-8"),
+        data=json.dumps({"path": "."}).encode("utf-8"),
         headers={"Content-Type": "application/json"}
     )
     with urllib.request.urlopen(req) as resp:

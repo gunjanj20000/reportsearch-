@@ -315,7 +315,7 @@ class DatabaseManager:
                 conn.execute("DELETE FROM document_collections")
                 conn.execute("DELETE FROM collections")
                 conn.execute("DELETE FROM documents")
-                conn.execute("VACUUM")
+            conn.execute("VACUUM")
 
     def get_search_service(self):
         """Return a SearchService instance bound to current thread connection."""

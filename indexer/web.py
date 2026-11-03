@@ -688,9 +688,7 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 {"name": "📥 Downloads", "path": str(home / "Downloads")},
                 {"name": "🖥️ Desktop", "path": str(home / "Desktop")},
             ]
-            corpus = Path(__file__).resolve().parent.parent / "sample_corpus"
-            if corpus.exists():
-                raw_shortcuts.append({"name": "📚 Sample Corpus", "path": str(corpus.resolve())})
+
 
             if sys.platform != "win32":
                 raw_shortcuts.append({"name": "💾 Root (/)", "path": "/"})
@@ -890,13 +888,8 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
 
             folders = data.get("folders", [])
             if not folders:
-                # Default to sample_corpus if available
-                sample_path = Path(__file__).resolve().parent.parent / "sample_corpus"
-                if sample_path.exists():
-                    folders = [str(sample_path)]
-                else:
-                    self.send_json({"error": "No folders specified and sample_corpus not found."}, status=400)
-                    return
+                self.send_json({"error": "No folder selected. Please click 'Browse Folder...' to choose a folder or compressed archive to index."}, status=400)
+                return
 
             def run_scan_worker():
                 _state.is_indexing = True
@@ -1909,7 +1902,7 @@ SPA_HTML = r"""<!DOCTYPE html>
           <div class="folder-meta-box">
             <span class="folder-label">SOURCE FOLDER TO SCAN:</span>
             <div id="displayCurrentFolder" class="folder-path-text">
-              sample_corpus (Default Medical Literature Archive)
+              No folder selected. Click "Browse Folder..." to choose documents to index.
             </div>
           </div>
         </div>
@@ -2169,7 +2162,7 @@ SPA_HTML = r"""<!DOCTYPE html>
 
 <script>
   let debounceTimer = null;
-  let currentSelectedFolderPath = 'sample_corpus';
+  let currentSelectedFolderPath = '';
   let browserCurrentPath = '';
   let browserParentPath = null;
 
@@ -2349,18 +2342,21 @@ SPA_HTML = r"""<!DOCTYPE html>
     const iconEl = document.getElementById('displayFolderIcon');
     if (!el) return;
 
-    const p = currentSelectedFolderPath || 'sample_corpus';
+    const p = currentSelectedFolderPath || '';
     const pLower = p.toLowerCase();
 
-    if (pLower.includes('sample_corpus')) {
-      if (iconEl) iconEl.textContent = '📚';
-      el.textContent = 'sample_corpus (Default Medical Literature Archive)';
-    } else if (pLower.startsWith('\\\\') || pLower.startsWith('smb://') || pLower.includes('gvfs')) {
+    if (!p) {
+      if (iconEl) iconEl.textContent = '📁';
+      el.textContent = 'No folder selected. Click "Browse Folder..." to choose documents to index.';
+    } else if (pLower.endsWith('.zip') || pLower.endsWith('.tar.gz') || pLower.endsWith('.tgz') || pLower.endsWith('.tar')) {
+      if (iconEl) iconEl.textContent = '📦';
+      el.textContent = 'Compressed Archive: ' + p;
+    } else if (pLower.startsWith('\\') || pLower.startsWith('smb://') || pLower.includes('gvfs')) {
       if (iconEl) iconEl.textContent = '🌐';
-      el.textContent = `Network Share: ${p}`;
+      el.textContent = 'Network Share: ' + p;
     } else if (pLower.includes('/media/') || pLower.includes('/run/media/') || pLower.includes('usb')) {
       if (iconEl) iconEl.textContent = '🔌';
-      el.textContent = `Attached Device: ${p}`;
+      el.textContent = 'Attached Device: ' + p;
     } else {
       if (iconEl) iconEl.textContent = '📁';
       el.textContent = p;
@@ -2369,14 +2365,17 @@ SPA_HTML = r"""<!DOCTYPE html>
 
   // --- Indexer Scan ---
   async function startScan() {
-    const folder = currentSelectedFolderPath || 'sample_corpus';
+    const folder = currentSelectedFolderPath;
+    if (!folder) {
+      alert('Please click "Browse Folder..." to choose a folder or compressed archive first.');
+      return;
+    }
     const folders = [folder];
 
     document.getElementById('activityLogs').textContent = 'Starting indexing scan for: ' + folder;
     document.getElementById('scanControls').style.display = 'flex';
     document.getElementById('indexerBadge').textContent = '● Indexing...';
     document.getElementById('indexerBadge').style.color = '#f59e0b';
-
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
