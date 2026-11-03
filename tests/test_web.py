@@ -117,3 +117,26 @@ def test_api_fs_native_dialog(web_server):
         assert resp.status == 200
         data = json.loads(resp.read().decode("utf-8"))
         assert "supported" in data
+
+
+def test_api_document_page_note(web_server):
+    """Test /api/document/page returns page content without modifying database."""
+    url = f"{web_server}/api/document/page?doc_id=1&page=1"
+    with urllib.request.urlopen(url) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["document_id"] == 1
+        assert "filename" in data
+        assert "page_number" in data
+        assert "total_pages" in data
+        assert "content" in data
+        assert len(data["content"]) > 0
+
+
+def test_api_document_page_invalid(web_server):
+    """Test /api/document/page returns 404 for nonexistent document."""
+    try:
+        urllib.request.urlopen(f"{web_server}/api/document/page?doc_id=999999&page=1")
+        assert False, "Should have raised HTTPError 404"
+    except urllib.error.HTTPError as e:
+        assert e.code == 404

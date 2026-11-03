@@ -141,72 +141,47 @@ class WebState:
         self.activity_logs: List[str] = []
         self.is_indexing = False
 
-        # Attach callbacks
-        self.engine.on_progress = self._on_progress
-        self.engine.on_error = self._on_error
-        self.engine.on_status_changed = self._on_status_changed
+        # Wire progress callback
+        def on_engine_progress(cur: int, tot: int, fn: str, msg: str):
+            with self.progress_lock:
+                self.progress_current = cur
+                self.progress_total = tot
+                self.progress_filename = fn
+                self.progress_message = msg
+                if msg:
+                    self.activity_logs.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+                    if len(self.activity_logs) > 500:
+                        self.activity_logs.pop(0)
 
-    def _on_progress(self, cur: int, tot: int, filename: str, msg: str) -> None:
-        with self.progress_lock:
-            self.progress_current = cur
-            self.progress_total = tot
-            self.progress_filename = filename
-            self.progress_message = msg
-            if filename:
-                self.activity_logs.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-                if len(self.activity_logs) > 100:
-                    self.activity_logs.pop(0)
-
-    def _on_error(self, path: str, err: str) -> None:
-        with self.progress_lock:
-            self.activity_logs.append(f"[{time.strftime('%H:%M:%S')}] ERROR: {Path(path).name} - {err}")
-            if len(self.activity_logs) > 100:
-                self.activity_logs.pop(0)
-
-    def _on_status_changed(self, status: str) -> None:
-        with self.progress_lock:
-            self.activity_logs.append(f"[{time.strftime('%H:%M:%S')}] Status: {status}")
-
-    def get_progress_data(self) -> Dict[str, Any]:
-        with self.progress_lock:
-            return {
-                "is_indexing": self.is_indexing,
-                "status": self.engine.status,
-                "current": self.progress_current,
-                "total": self.progress_total,
-                "filename": self.progress_filename,
-                "message": self.progress_message,
-                "logs": self.activity_logs[-30:]
-            }
+        self.engine.on_progress = on_engine_progress
 
 
-# Singleton web state
 _state: Optional[WebState] = None
 
 
 class MedicalSearchHandler(BaseHTTPRequestHandler):
-    """HTTP Request Handler providing REST endpoints and serving the modern SPA."""
+    """Zero-dependency HTTP Handler providing JSON REST API and modern SPA."""
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Suppress noisy standard HTTP logs, keep custom logger
+        """Suppress standard HTTP server access logs to stdout to keep console clean."""
         pass
 
     def send_json(self, data: Any, status: int = 200) -> None:
-        payload = json.dumps(data, default=str).encode("utf-8")
+        """Serialize data to JSON and send response."""
+        resp = json.dumps(data, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Length", str(len(resp)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
-        self.wfile.write(payload)
+        self.wfile.write(resp)
 
     def do_OPTIONS(self) -> None:
+        """Handle CORS pre-flight requests."""
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -217,8 +192,9 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
         # 1. Dashboard Stats API
         if path == "/api/stats":
             stats = _state.db.get_dashboard_stats()
-            lo = find_libreoffice_binary()
-            tess = find_tesseract_binary()
+            lo_bin = find_libreoffice_binary()
+            tess_bin = find_tesseract_binary()
+
             self.send_json({
                 "total_documents": stats.total_documents,
                 "total_original_file_size": stats.total_original_file_size,
@@ -230,17 +206,24 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 "number_of_pdf_pages": stats.number_of_pdf_pages,
                 "number_of_word_documents": stats.number_of_word_documents,
                 "number_of_scanned_pdfs": stats.number_of_scanned_pdfs,
-                "last_indexing_date": stats.last_indexing_date,
-                "libreoffice_found": bool(lo),
-                "libreoffice_path": lo or "",
-                "tesseract_found": bool(tess),
-                "tesseract_path": tess or ""
+                "last_indexing_date": stats.last_indexing_date or "Never",
+                "libreoffice": lo_bin is not None,
+                "tesseract": tess_bin is not None,
+                "is_indexing": _state.is_indexing
             })
             return
 
-        # 2. Indexing Progress API
+        # 2. Indexing Progress Poll API
         if path == "/api/scan/progress":
-            self.send_json(_state.get_progress_data())
+            with _state.progress_lock:
+                self.send_json({
+                    "is_indexing": _state.is_indexing,
+                    "current": _state.progress_current,
+                    "total": _state.progress_total,
+                    "filename": _state.progress_filename,
+                    "message": _state.progress_message,
+                    "logs": _state.activity_logs[-30:]
+                })
             return
 
         # 3. Search API
@@ -414,7 +397,57 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # 9. Serve Embedded Modern Web App HTML
+        # 9. Document Page Note API (Read-only, 0 bytes added to index)
+        if path == "/api/document/page":
+            try:
+                doc_id = int(params.get("doc_id", ["0"])[0])
+                page_num = int(params.get("page", ["1"])[0])
+            except ValueError:
+                self.send_json({"error": "Invalid doc_id or page parameter."}, status=400)
+                return
+
+            conn = _state.db.get_connection()
+            doc_row = conn.execute(
+                "SELECT filename, extension, source_path, page_count FROM documents WHERE document_id = ?",
+                (doc_id,)
+            ).fetchone()
+
+            if not doc_row:
+                self.send_json({"error": "Document not found."}, status=404)
+                return
+
+            filename, extension, source_path, page_count = doc_row
+
+            # Fetch page content directly from SQLite without writing anything
+            page_row = conn.execute(
+                "SELECT extracted_text FROM document_pages WHERE document_id = ? AND page_number = ?",
+                (doc_id, page_num)
+            ).fetchone()
+
+            page_content = ""
+            if page_row and page_row[0]:
+                page_content = page_row[0]
+            else:
+                # Fallback to document_paragraphs if document_pages is empty
+                paras = conn.execute(
+                    "SELECT paragraph_text FROM document_paragraphs WHERE document_id = ? AND page_number = ? ORDER BY paragraph_number",
+                    (doc_id, page_num)
+                ).fetchall()
+                if paras:
+                    page_content = "\n\n".join(p[0] for p in paras if p[0])
+
+            self.send_json({
+                "document_id": doc_id,
+                "filename": filename,
+                "extension": extension.replace(".", "").upper(),
+                "source_path": source_path,
+                "page_number": page_num,
+                "total_pages": max(page_count or 1, 1),
+                "content": page_content
+            })
+            return
+
+        # 10. Serve Embedded Modern Web App HTML
         if path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -482,62 +515,72 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 _state.engine.cancel()
                 self.send_json({"success": True, "status": _state.engine.status})
             else:
-                self.send_json({"error": f"Unknown action: {action}"}, status=400)
+                self.send_json({"error": "Invalid action. Supported: pause, resume, cancel."}, status=400)
             return
 
-        # 3. Retry Failed
+        # 3. Retry Failed Documents
         if path == "/api/retry":
-            if _state.is_indexing:
-                self.send_json({"error": "Indexing is currently running."}, status=400)
-                return
-
             def run_retry_worker():
                 _state.is_indexing = True
                 try:
                     _state.engine.retry_failed()
                 except Exception as e:
-                    logger.error(f"Error in retry worker: {e}")
+                    logger.error(f"Error in web retry scan: {e}")
                 finally:
                     _state.is_indexing = False
 
             thread = threading.Thread(target=run_retry_worker, daemon=True)
             thread.start()
-            self.send_json({"success": True, "message": "Retrying failed documents started."})
+            self.send_json({"success": True, "message": "Retrying failed documents."})
             return
 
-        # 4. Add / Update Synonym
+        # 4. Clear Database
+        if path == "/api/clear":
+            if _state.is_indexing:
+                self.send_json({"error": "Cannot clear database while indexing is running."}, status=400)
+                return
+            _state.engine.clear_database()
+            self.send_json({"success": True, "message": "Database reset successfully."})
+            return
+
+        # 5. Add / Update Synonym
         if path == "/api/synonyms":
             term = data.get("term", "").strip()
             expanded = data.get("expanded", "").strip()
             if not term or not expanded:
-                self.send_json({"error": "Both 'term' and 'expanded' are required."}, status=400)
+                self.send_json({"error": "Term and expansion cannot be empty."}, status=400)
                 return
-
-            _state.synonym_manager.add(term, expanded)
-            self.send_json({"success": True, "message": f"Synonym added for '{term}'."})
+            _state.synonym_manager.add_synonym(term, expanded)
+            self.send_json({"success": True, "term": term, "expanded": expanded})
             return
 
-        # 5. Export Portable Database for Mobile PWA
+        # 6. Native OS Folder Dialog API
+        if path == "/api/fs/native_dialog":
+            initial_dir = data.get("initial_dir", "")
+            supported, selected_path, err_msg = open_native_folder_dialog(initial_dir)
+            self.send_json({
+                "supported": supported,
+                "path": selected_path,
+                "error": err_msg
+            })
+            return
+
+        # 7. Generate Portable Database Export
         if path == "/api/export":
-            export_type = data.get("type", "search-only")
+            export_type = data.get("type", "compact").lower()
             compress = data.get("compress", True)
-            since = data.get("since", "2000-01-01")
+            since = data.get("since")
 
-            EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-
             try:
-                if export_type == "search-only":
-                    ext = ".db.zst" if compress else ".db"
-                    target_file = EXPORTS_DIR / f"medical_search_portable_{timestamp}{ext}"
-                    res = _state.export_manager.export_search_only_database(target_file, compress=compress)
-                elif export_type == "full":
-                    ext = ".db.zst" if compress else ".db"
-                    target_file = EXPORTS_DIR / f"medical_search_backup_{timestamp}{ext}"
+                if export_type == "full":
+                    target_file = EXPORTS_DIR / f"medical_full_{timestamp}.db"
                     res = _state.export_manager.export_full_database(target_file, compress=compress)
+                elif export_type == "compact":
+                    target_file = EXPORTS_DIR / f"medical_search_compact_{timestamp}.db"
+                    res = _state.export_manager.export_search_only_database(target_file, compress=compress)
                 else:
-                    ext = ".json.zst" if compress else ".json"
-                    target_file = EXPORTS_DIR / f"medical_search_delta_{timestamp}{ext}"
+                    target_file = EXPORTS_DIR / f"medical_delta_{timestamp}.json"
                     res = _state.export_manager.export_incremental_package(target_file, since_date=since, compress=compress)
 
                 self.send_json({
@@ -557,164 +600,364 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(e)}, status=500)
             return
 
-        # 6. Native OS Folder Dialog API
-        if path == "/api/fs/native_dialog":
-            initial_dir = data.get("initial_dir", "")
-            supported, selected_path, err_msg = open_native_folder_dialog(initial_dir)
-            self.send_json({
-                "supported": supported,
-                "path": selected_path,
-                "error": err_msg
-            })
-            return
-
         self.send_error(404, "Not Found")
 
 
-SPA_HTML = """<!DOCTYPE html>
+SPA_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Medical Literature Search — Web Dashboard</title>
+  <title>Medical Literature Search — Clinical Indexer & Discovery</title>
   <style>
     :root {
       --primary: #0284c7;
       --primary-dark: #0369a1;
+      --primary-light: #e0f2fe;
       --bg: #f8fafc;
       --card-bg: #ffffff;
       --text: #0f172a;
       --text-muted: #64748b;
       --border: #e2e8f0;
+      --border-focus: #38bdf8;
       --accent-green: #10b981;
+      --accent-green-dark: #059669;
       --accent-amber: #f59e0b;
       --accent-red: #ef4444;
-      --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+      --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+      --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.06);
+      --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.12), 0 8px 10px -6px rgb(0 0 0 / 0.08);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background-color: var(--bg); color: var(--text); line-height: 1.5; }
-    header { background: #0f172a; color: white; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; border-bottom: 3px solid var(--primary); }
-    header h1 { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
-    header .status-badge { font-size: 0.8rem; background: #1e293b; padding: 0.25rem 0.6rem; border-radius: 9999px; border: 1px solid #334155; }
+    
+    header {
+      background: #0f172a;
+      color: white;
+      padding: 1rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 3px solid var(--primary);
+    }
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    header .status-badge {
+      font-size: 0.82rem;
+      background: #1e293b;
+      color: #38bdf8;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      border: 1px solid #334155;
+      font-weight: 600;
+    }
     .container { max-width: 1200px; margin: 1.5rem auto; padding: 0 1rem; }
     
     /* Navigation Tabs */
     .tabs { display: flex; gap: 0.5rem; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem; }
-    .tab-btn { background: none; border: none; padding: 0.6rem 1.2rem; font-size: 0.95rem; font-weight: 600; color: var(--text-muted); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+    .tab-btn {
+      background: none;
+      border: none;
+      padding: 0.7rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      margin-bottom: -2px;
+      transition: all 0.15s;
+    }
+    .tab-btn:hover { color: var(--primary); }
     .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
 
     /* Dashboard Metrics Cards */
-    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-    .metric-card { background: var(--card-bg); border-radius: 8px; padding: 1.2rem; border: 1px solid var(--border); box-shadow: var(--shadow); }
-    .metric-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; margin-bottom: 0.35rem; }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .metric-card {
+      background: var(--card-bg);
+      border-radius: 10px;
+      padding: 1.1rem 1.25rem;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    .metric-title {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-weight: 700;
+      margin-bottom: 0.35rem;
+    }
     .metric-val { font-size: 1.6rem; font-weight: 700; color: var(--text); }
-    .metric-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem; }
+    .metric-sub { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
 
     /* Cards & Controls */
-    .card { background: var(--card-bg); border-radius: 8px; padding: 1.5rem; border: 1px solid var(--border); box-shadow: var(--shadow); margin-bottom: 1.5rem; }
-    .card-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
-    .form-group { margin-bottom: 1rem; }
-    label { display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.3rem; }
-    input[type="text"], select { width: 100%; padding: 0.6rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); font-size: 0.95rem; outline: none; }
-    input[type="text"]:focus { border-color: var(--primary); }
-    .btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.9rem; transition: background 0.2s; }
+    .card {
+      background: var(--card-bg);
+      border-radius: 10px;
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      margin-bottom: 1.5rem;
+    }
+    .card-centered {
+      max-width: 820px;
+      margin: 0 auto 1.5rem auto;
+    }
+    .card-title-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.2rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.6rem;
+    }
+    .card-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #0f172a;
+    }
+
+    /* Clean Folder Selection Box in Tab 1 */
+    .folder-selection-card {
+      background: #f8fafc;
+      border: 1.5px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+    .folder-selection-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .folder-icon-box {
+      font-size: 2.2rem;
+      line-height: 1;
+    }
+    .folder-meta-box {
+      flex: 1;
+      min-width: 0;
+    }
+    .folder-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-weight: 700;
+      display: block;
+      margin-bottom: 4px;
+    }
+    .folder-path-text {
+      font-family: monospace;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #0369a1;
+      word-break: break-all;
+    }
+    .folder-action-buttons {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    /* Buttons */
+    .btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 0.65rem 1.25rem;
+      border-radius: 7px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.92rem;
+      transition: all 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
     .btn:hover { background: var(--primary-dark); }
     .btn-secondary { background: #64748b; }
     .btn-secondary:hover { background: #475569; }
+    .btn-success { background: var(--accent-green); }
+    .btn-success:hover { background: var(--accent-green-dark); }
     .btn-danger { background: var(--accent-red); }
     .btn-danger:hover { background: #dc2626; }
-    .btn-group { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.8rem; }
+    .btn-sm { padding: 0.4rem 0.75rem; font-size: 0.82rem; }
 
-    /* Progress bar */
-    .progress-bar-container { width: 100%; background: #e2e8f0; height: 12px; border-radius: 6px; overflow: hidden; margin: 1rem 0 0.5rem 0; }
-    .progress-bar-fill { height: 100%; background: var(--primary); width: 0%; transition: width 0.3s; }
-    .progress-label { font-size: 0.85rem; color: var(--text-muted); display: flex; justify-content: space-between; }
-
-    /* Activity log */
-    .log-box { background: #0f172a; color: #f1f5f9; font-family: monospace; font-size: 0.82rem; padding: 0.8rem; border-radius: 6px; height: 160px; overflow-y: auto; white-space: pre-wrap; margin-top: 1rem; }
-
-    /* Search interface */
-    .search-bar { display: flex; gap: 0.5rem; position: relative; margin-bottom: 1rem; }
-    .search-options { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 1.2rem; font-size: 0.9rem; }
-    .suggestions-list { position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid var(--border); border-radius: 6px; box-shadow: var(--shadow); max-height: 200px; overflow-y: auto; z-index: 100; display: none; }
-    .suggestion-item { padding: 0.5rem 0.8rem; cursor: pointer; font-size: 0.9rem; }
-    .suggestion-item:hover { background: #e0f2fe; }
-
-    /* Results */
-    .result-card { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; box-shadow: var(--shadow); }
-    .result-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.4rem; }
-    .result-title { font-size: 1.05rem; font-weight: 600; color: var(--primary-dark); }
-    .result-badge { font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.5rem; border-radius: 4px; background: #e0f2fe; color: var(--primary-dark); text-transform: uppercase; }
-    .result-meta { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.6rem; }
-    .result-snippet { font-size: 0.9rem; color: #334155; line-height: 1.6; }
-    mark { background: #fef08a; padding: 0.1rem 0.2rem; border-radius: 2px; font-weight: 600; }
-
-    /* Synonyms Table */
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    th, td { padding: 0.6rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); }
-    th { background: #f1f5f9; font-weight: 600; color: var(--text-muted); }
-    /* Folder Manager & Chips */
-    .folder-list-container {
-      background: #f8fafc;
-      border: 1px dashed #cbd5e1;
-      border-radius: 8px;
-      padding: 10px;
-      min-height: 48px;
+    /* Scan Controls */
+    .scan-sub-controls {
       display: flex;
+      gap: 8px;
       flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      margin-top: 6px;
-      margin-bottom: 10px;
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
     }
-    .folder-chip {
-      background: white;
-      border: 1px solid #cbd5e1;
+
+    /* Progress Bar */
+    .progress-bar-container {
+      width: 100%;
+      background: #e2e8f0;
+      height: 12px;
       border-radius: 6px;
-      padding: 6px 12px;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.88rem;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      overflow: hidden;
+      margin: 1.25rem 0 0.5rem 0;
     }
-    .folder-chip-path {
-      font-family: monospace;
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent-green);
+      width: 0%;
+      transition: width 0.3s;
+    }
+    .progress-label {
       font-size: 0.85rem;
-      color: #1e293b;
-      word-break: break-all;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      font-weight: 500;
     }
-    .chip-remove {
-      background: none;
-      border: none;
-      color: #94a3b8;
-      cursor: pointer;
-      font-weight: 700;
+
+    /* Activity Log */
+    .log-box {
+      background: #0f172a;
+      color: #f1f5f9;
+      font-family: monospace;
+      font-size: 0.82rem;
+      padding: 0.9rem;
+      border-radius: 7px;
+      height: 150px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      margin-top: 1rem;
+      border: 1px solid #1e293b;
+    }
+
+    /* Search Tab */
+    .search-bar { display: flex; gap: 0.5rem; position: relative; margin-bottom: 1rem; }
+    .search-bar input[type="text"] {
+      flex: 1;
+      padding: 0.75rem 1rem;
       font-size: 1rem;
-      line-height: 1;
-      padding: 0 2px;
+      border-radius: 8px;
+      border: 1.5px solid var(--border);
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .search-bar input[type="text"]:focus { border-color: var(--primary); }
+    .search-options {
+      display: flex;
+      gap: 1.25rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 1.25rem;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+    .search-options select {
+      padding: 0.4rem 0.8rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .suggestions-list {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: var(--shadow-lg);
+      max-height: 220px;
+      overflow-y: auto;
+      z-index: 100;
+      display: none;
+    }
+    .suggestion-item { padding: 0.55rem 0.9rem; cursor: pointer; font-size: 0.92rem; }
+    .suggestion-item:hover { background: var(--primary-light); color: var(--primary-dark); }
+
+    /* Result Cards */
+    .result-card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .result-card:hover {
+      border-color: #38bdf8;
+      box-shadow: var(--shadow);
+      transform: translateY(-1px);
+    }
+    .result-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 0.4rem;
+    }
+    .result-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--primary-dark);
+    }
+    .result-badge {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.2rem 0.55rem;
+      border-radius: 4px;
+      background: var(--primary-light);
+      color: var(--primary-dark);
+      text-transform: uppercase;
+    }
+    .result-meta {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-bottom: 0.65rem;
+    }
+    .page-tag {
+      font-weight: 700;
+      color: #0369a1;
+      background: #e0f2fe;
+      padding: 1px 6px;
       border-radius: 4px;
     }
-    .chip-remove:hover {
-      color: var(--accent-red);
-      background: #fee2e2;
+    .result-snippet {
+      font-size: 0.92rem;
+      color: #334155;
+      line-height: 1.6;
     }
-    .folder-actions-row {
+    mark { background: #fef08a; padding: 1px 3px; border-radius: 2px; font-weight: 600; color: #854d0e; }
+    .result-footer-actions {
       display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+      justify-content: space-between;
       align-items: center;
+      margin-top: 0.85rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid #f1f5f9;
     }
-    .folder-input-wrapper {
-      display: flex;
-      gap: 8px;
-      flex: 1;
-      min-width: 280px;
+    .result-hint {
+      font-size: 0.78rem;
+      color: #94a3b8;
+      font-style: italic;
     }
 
-    /* Modal Dialog */
+    /* Modal Overlays & Dialogs */
     .modal-overlay {
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
@@ -734,8 +977,9 @@ SPA_HTML = """<!DOCTYPE html>
       max-height: 85vh;
       display: flex;
       flex-direction: column;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+      box-shadow: var(--shadow-lg);
       overflow: hidden;
+      border: 1px solid var(--border);
     }
     .modal-header {
       padding: 1rem 1.25rem;
@@ -744,6 +988,14 @@ SPA_HTML = """<!DOCTYPE html>
       justify-content: space-between;
       align-items: center;
       background: #f8fafc;
+    }
+    .modal-header-title {
+      font-weight: 700;
+      font-size: 1.1rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #0f172a;
     }
     .modal-close {
       background: none;
@@ -754,12 +1006,19 @@ SPA_HTML = """<!DOCTYPE html>
       padding: 4px 8px;
       border-radius: 4px;
     }
-    .modal-close:hover {
-      background: #e2e8f0;
-      color: var(--text);
+    .modal-close:hover { background: #e2e8f0; color: var(--text); }
+    .modal-subbanner {
+      padding: 0.6rem 1.25rem;
+      background: #f1f5f9;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
     .fb-shortcuts {
-      padding: 0.6rem 1.25rem;
+      padding: 0.65rem 1.25rem;
       background: #ffffff;
       border-bottom: 1px solid var(--border);
       display: flex;
@@ -771,8 +1030,8 @@ SPA_HTML = """<!DOCTYPE html>
       background: #f1f5f9;
       border: 1px solid #e2e8f0;
       border-radius: 9999px;
-      padding: 4px 10px;
-      font-size: 0.8rem;
+      padding: 4px 11px;
+      font-size: 0.82rem;
       font-weight: 500;
       cursor: pointer;
       color: #334155;
@@ -842,6 +1101,11 @@ SPA_HTML = """<!DOCTYPE html>
       color: #0369a1;
       font-weight: 600;
     }
+    .fb-dir-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .modal-footer {
       padding: 1rem 1.25rem;
       border-top: 1px solid var(--border);
@@ -852,13 +1116,136 @@ SPA_HTML = """<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 10px;
     }
+    .modal-footer-info {
+      flex: 1;
+      min-width: 220px;
+    }
+    .modal-footer-label {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: block;
+    }
+    .modal-footer-path {
+      font-family: monospace;
+      font-size: 0.88rem;
+      font-weight: 600;
+      word-break: break-all;
+      color: var(--primary-dark);
+    }
+
+    /* Page Note Modal Styling (Small Clinical Note) */
+    .note-box {
+      background: #ffffff;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 820px;
+      max-height: 88vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.35);
+      border: 1px solid #cbd5e1;
+      overflow: hidden;
+      animation: noteSlideIn 0.18s ease-out;
+    }
+    @keyframes noteSlideIn {
+      from { transform: translateY(-12px) scale(0.98); opacity: 0; }
+      to { transform: translateY(0) scale(1); opacity: 1; }
+    }
+    .note-header {
+      padding: 0.9rem 1.25rem;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .note-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .note-icon { font-size: 1.6rem; }
+    .note-title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: #0f172a;
+      word-break: break-all;
+    }
+    .note-subtitle {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .note-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .note-toolbar {
+      padding: 0.5rem 1.25rem;
+      background: #f1f5f9;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 12px;
+    }
+    .note-page-badge {
+      font-size: 0.85rem;
+      font-weight: 600;
+      background: white;
+      padding: 3px 12px;
+      border-radius: 9999px;
+      border: 1px solid #cbd5e1;
+      color: #1e293b;
+    }
+    .note-content-container {
+      padding: 1.5rem;
+      overflow-y: auto;
+      flex: 1;
+      max-height: 56vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 0.95rem;
+      line-height: 1.7;
+      color: #1e293b;
+      background: #fafaf9; /* clinical paper note tint */
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .note-footer {
+      padding: 0.65rem 1.25rem;
+      background: #f8fafc;
+      border-top: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.78rem;
+      color: #64748b;
+    }
+    .note-path {
+      font-family: monospace;
+      max-width: 60%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .note-badge-safe {
+      color: #059669;
+      font-weight: 600;
+    }
+
+    /* Synonyms Table */
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { padding: 0.65rem 0.85rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { background: #f1f5f9; font-weight: 600; color: var(--text-muted); }
   </style>
 </head>
 <body>
 
 <header>
-  <h1>🫀 Medical Literature Search — Indexer & Web Dashboard</h1>
-  <div class="status-badge" id="headerStatus">Ready</div>
+  <h1>🫀 Medical Literature Search & Discovery</h1>
+  <div class="status-badge" id="headerStatus">● Ready</div>
 </header>
 
 <div class="container">
@@ -888,59 +1275,62 @@ SPA_HTML = """<!DOCTYPE html>
 
   <!-- Navigation Tabs -->
   <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('tabIndexer')">1. Indexer & Scanning</button>
+    <button class="tab-btn active" onclick="switchTab('tabIndexer')">1. Indexer & Scan</button>
     <button class="tab-btn" onclick="switchTab('tabSearch')">2. Full-Text Search</button>
     <button class="tab-btn" onclick="switchTab('tabSynonyms')">3. Cardiology Synonyms</button>
     <button class="tab-btn" onclick="switchTab('tabExport')">4. Mobile PWA Export</button>
   </div>
 
-  <!-- Tab 1: Indexer -->
+  <!-- Tab 1: Indexer (Decluttered, single Browse Folder button) -->
   <div id="tabIndexer" class="tab-content active">
-    <div class="card">
-      <div class="card-title">Document Folders & Scan Controls</div>
-      <div class="form-group">
-        <label>Selected Source Folders to Index:</label>
-        <div id="folderList" class="folder-list-container"></div>
+    <div class="card card-centered">
+      <div class="card-title-bar">
+        <div class="card-title">Document Source & Indexing</div>
+        <span class="status-badge" id="indexerBadge">● Ready</span>
+      </div>
 
-        <div class="folder-actions-row">
-          <div class="folder-input-wrapper">
-            <input type="text" id="folderInput" placeholder="Enter folder path manually or use buttons below..." onkeydown="if(event.key==='Enter'){addFolderFromInput();event.preventDefault();}">
-            <button class="btn btn-secondary" onclick="addFolderFromInput()">➕ Add Path</button>
+      <div class="folder-selection-card">
+        <div class="folder-selection-header">
+          <div class="folder-icon-box">📁</div>
+          <div class="folder-meta-box">
+            <span class="folder-label">SOURCE FOLDER TO SCAN:</span>
+            <div id="displayCurrentFolder" class="folder-path-text">
+              sample_corpus (Default Medical Literature Archive)
+            </div>
           </div>
-          <button class="btn" onclick="openSystemFolderPicker()" title="Open native OS File Explorer to select a folder">
-            🖥️ Open File Explorer
+        </div>
+
+        <div class="folder-action-buttons">
+          <button class="btn btn-primary" onclick="openFolderBrowser()" id="btnBrowseFolder" title="Choose any folder on your computer to index">
+            <span>📂</span> <strong>Browse Folder...</strong>
           </button>
-          <button class="btn btn-secondary" onclick="openWebFolderBrowser()" title="Browse server folders in an interactive directory browser">
-            📂 Browse Folders...
+          <button class="btn btn-secondary" onclick="resetToSampleCorpus()" title="Switch back to sample corpus">
+            <span>📚</span> Use Sample Corpus
           </button>
-          <button class="btn btn-secondary" onclick="addSampleCorpusFolder()" title="Add built-in medical sample corpus">
-            📚 Sample Corpus
-          </button>
-          <button class="btn btn-danger" onclick="clearFolders()" title="Clear folder list">
-            🗑️ Clear All
+          <button class="btn btn-success" id="btnStartScan" onclick="startScan()" style="margin-left: auto;">
+            <span>🚀</span> <strong>Start Indexing</strong>
           </button>
         </div>
       </div>
 
-      <div class="btn-group" style="margin-top: 1.2rem;">
-        <button class="btn" id="btnStartScan" onclick="startScan()" style="background: #10b981; font-size: 1rem; padding: 0.7rem 1.6rem;">
-          🚀 Start Indexing
-        </button>
-        <button class="btn btn-secondary" onclick="controlScan('pause')">⏸️ Pause</button>
-        <button class="btn btn-secondary" onclick="controlScan('resume')">▶️ Resume</button>
-        <button class="btn btn-danger" onclick="controlScan('cancel')">⏹️ Cancel</button>
-        <button class="btn btn-secondary" onclick="retryFailed()">🔄 Retry Failed</button>
+      <!-- Controls row (active during scanning) -->
+      <div class="scan-sub-controls" id="scanControls" style="display: none;">
+        <button class="btn btn-sm btn-secondary" onclick="controlScan('pause')">⏸️ Pause</button>
+        <button class="btn btn-sm btn-secondary" onclick="controlScan('resume')">▶️ Resume</button>
+        <button class="btn btn-sm btn-danger" onclick="controlScan('cancel')">⏹️ Cancel</button>
+        <button class="btn btn-sm btn-secondary" onclick="retryFailed()">🔄 Retry Failed</button>
       </div>
 
+      <!-- Progress Section -->
       <div class="progress-bar-container">
         <div class="progress-bar-fill" id="progressFill"></div>
       </div>
       <div class="progress-label">
-        <span id="progressFile">Idle</span>
+        <span id="progressFile">Ready to scan</span>
         <span id="progressPct">0%</span>
       </div>
 
-      <div class="log-box" id="activityLogs">Indexer ready. Click 'Start Indexing' to begin.</div>
+      <div class="log-box" id="activityLogs">Indexer ready. Click 'Browse Folder...' to select a folder or 'Start Indexing' to begin.</div>
     </div>
   </div>
 
@@ -949,26 +1339,27 @@ SPA_HTML = """<!DOCTYPE html>
     <div class="card">
       <div class="card-title">Instant Full-Text Search & Cardiology Exploration</div>
       <div class="search-bar">
-        <input type="text" id="searchInput" placeholder="Search literature (e.g. 'Left Main', 'CTO', 'drug eluting stent', 'litho*')..." oninput="onSearchInput()">
+        <input type="text" id="searchInput" placeholder="Search literature (e.g. 'Left Main', 'CTO', 'drug eluting stent', 'litho*')..." oninput="onSearchInput()" onkeydown="if(event.key==='Enter')performSearch();">
         <button class="btn" onclick="performSearch()">Search</button>
         <div class="suggestions-list" id="suggestionsList"></div>
       </div>
       <div class="search-options">
         <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer;">
-          <input type="checkbox" id="synonymCheck" checked onchange="performSearch()">
-          <strong>Expand Cardiology Synonyms</strong> (e.g. LM ↔ Left Main, CTO ↔ Chronic Total Occlusion)
+          <input type="checkbox" id="chkSynonyms" checked>
+          <strong>Expand Cardiology Synonyms</strong> (e.g. LM &harr; Left Main, BMS &harr; Bare-Metal Stent)
         </label>
-        <div style="display:flex; align-items:center; gap:0.5rem; margin-left:auto;">
-          <label style="margin:0;">Format:</label>
-          <select id="formatFilter" onchange="performSearch()" style="width:auto; padding:0.3rem 0.6rem;">
-            <option value="all">All Formats</option>
+        <div>
+          <label>File Format: </label>
+          <select id="selFormat" onchange="performSearch()">
+            <option value="all">All Formats (.pdf, .docx, .doc, .txt)</option>
             <option value="pdf">PDF only</option>
             <option value="docx">DOCX only</option>
-            <option value="doc">DOC only</option>
-            <option value="txt">TXT only</option>
+            <option value="doc">Legacy DOC only</option>
+            <option value="txt">Text only</option>
           </select>
         </div>
       </div>
+
       <div id="searchMetrics" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;"></div>
       <div id="searchResultsList"></div>
     </div>
@@ -977,25 +1368,21 @@ SPA_HTML = """<!DOCTYPE html>
   <!-- Tab 3: Synonyms -->
   <div id="tabSynonyms" class="tab-content">
     <div class="card">
-      <div class="card-title">Cardiology Synonym & Acronym Dictionary</div>
-      <p style="font-size:0.9rem; color:var(--text-muted); margin-bottom:1rem;">
-        When enabled, searching for an abbreviation automatically matches all associated clinical terms and vice versa without manual typing.
-      </p>
-      <div style="display:flex; gap:0.5rem; margin-bottom:1.5rem;">
-        <input type="text" id="newSynTerm" placeholder="Acronym (e.g. TAVR)" style="max-width:200px;">
-        <input type="text" id="newSynExpanded" placeholder="Expansion (e.g. transcatheter aortic valve replacement, TAVI)">
-        <button class="btn" onclick="addSynonym()">Add Synonym</button>
+      <div class="card-title">Cardiology Synonym & Medical Terminology Dictionary</div>
+      <div style="display:flex; gap:0.5rem; margin-bottom:1.5rem; flex-wrap:wrap;">
+        <input type="text" id="newSynTerm" placeholder="Abbreviation / Term (e.g. TAVR)" style="flex:1; min-width:200px; padding:0.6rem; border:1px solid var(--border); border-radius:6px;">
+        <input type="text" id="newSynExpanded" placeholder="Full Clinical Expansion (e.g. Transcatheter Aortic Valve Replacement)" style="flex:2; min-width:280px; padding:0.6rem; border:1px solid var(--border); border-radius:6px;">
+        <button class="btn" onclick="addSynonym()">➕ Add Synonym</button>
       </div>
+
       <table>
         <thead>
           <tr>
-            <th style="width:25%;">Term / Acronym</th>
-            <th>Expansions & Clinical Synonyms</th>
+            <th style="width:25%;">Cardiology Term / Abbr</th>
+            <th>Clinical Expansion / Synonyms</th>
           </tr>
         </thead>
-        <tbody id="synonymsTableBody">
-          <tr><td colspan="2">Loading synonyms...</td></tr>
-        </tbody>
+        <tbody id="synonymsTableBody"></tbody>
       </table>
     </div>
   </div>
@@ -1003,271 +1390,257 @@ SPA_HTML = """<!DOCTYPE html>
   <!-- Tab 4: Export -->
   <div id="tabExport" class="tab-content">
     <div class="card">
-      <div class="card-title">Export Portable Database for Mobile PWA</div>
-      <p style="font-size:0.9rem; color:var(--text-muted); margin-bottom:1.2rem;">
-        Export a high-performance, compressed search database for instant offline full-text search on iPhone, iPad, and Android without requiring the original 16 GB document files.
+      <div class="card-title">Mobile PWA & Offline Database Exporter</div>
+      <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:1.2rem;">
+        Generate lightweight, portable SQLite search databases with streaming Zstandard compression for offline clinical search.
       </p>
-      <div class="form-group">
-        <label>Export Package Type:</label>
-        <select id="exportType" style="max-width:350px;">
-          <option value="search-only">Search-Only Compact DB (Recommended for Mobile PWA)</option>
-          <option value="full">Full Database Snapshot (All Documents & Logs)</option>
-          <option value="delta">Incremental Delta Package (.json)</option>
-        </select>
+
+      <div style="background:#f8fafc; border:1px solid var(--border); border-radius:8px; padding:1.2rem; margin-bottom:1.5rem;" id="exportPreviewBox">
+        <div style="font-weight:600; margin-bottom:0.5rem;">Estimated Sizing Preview:</div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; font-size:0.9rem;">
+          <div>Full DB Size: <strong id="expActualSize">--</strong></div>
+          <div>Compact Search DB: <strong id="expCompactSize">--</strong></div>
+          <div>Compressed Zstandard: <strong id="expZstdSize" style="color:var(--accent-green-dark);">-- (~95% reduction)</strong></div>
+        </div>
       </div>
-      <div class="form-group">
-        <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer;">
-          <input type="checkbox" id="exportCompress" checked>
-          <strong>Compress with Zstandard (ZSTD)</strong> — Achieves >95% reduction for rapid mobile downloads
+
+      <div style="display:flex; gap:1.5rem; flex-wrap:wrap; margin-bottom:1.5rem;">
+        <label><input type="radio" name="expType" value="compact" checked> <strong>Search-Only Compact DB</strong></label>
+        <label><input type="radio" name="expType" value="full"> <strong>Full Database</strong></label>
+        <label><input type="radio" name="expType" value="incremental"> <strong>Incremental Delta</strong></label>
+      </div>
+
+      <div style="margin-bottom:1.5rem;">
+        <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="checkbox" id="chkZstdCompress" checked>
+          Enable Zstandard Ultra-Compression (level 10)
         </label>
       </div>
-      <button class="btn" id="btnExport" onclick="runExport()" style="font-size:1rem; padding:0.7rem 1.5rem;">
+
+      <button class="btn btn-success" id="btnExport" onclick="generateExport()">
         🚀 Generate & Download Export
       </button>
 
-      <div id="exportResult" style="margin-top:1.5rem; display:none;"></div>
+      <div id="exportResultBox" style="margin-top:1.5rem; display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Folder Browser Modal (Interactive Directory Explorer) -->
+<div id="folderBrowserModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closeFolderBrowser();">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-header-title">
+        <span>📂</span> Select Folder for Indexing
+      </div>
+      <button class="modal-close" onclick="closeFolderBrowser()" title="Close (Esc)">✕</button>
+    </div>
+
+    <!-- Shortcuts -->
+    <div class="fb-shortcuts" id="fbShortcuts"></div>
+
+    <!-- Navigation Bar -->
+    <div class="fb-nav-bar">
+      <button class="btn btn-sm btn-secondary" id="fbUpBtn" onclick="fbGoUp()">⬆️ Up</button>
+      <div class="fb-breadcrumbs" id="fbBreadcrumbs"></div>
+    </div>
+
+    <!-- Folder Grid -->
+    <div class="fb-list-container" id="fbDirList">
+      <div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">Loading directories...</div>
+    </div>
+
+    <!-- Modal Footer -->
+    <div class="modal-footer">
+      <div class="modal-footer-info">
+        <span class="modal-footer-label">Selected:</span>
+        <span id="fbSelectedPath" class="modal-footer-path"></span>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-secondary" onclick="closeFolderBrowser()">Cancel</button>
+        <button class="btn btn-primary" onclick="confirmFolderSelection()">
+          ✅ Select This Folder
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Page Note Modal (Small Note for Exact Page Content) -->
+<div id="pageNoteModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closePageNote();">
+  <div class="note-box">
+    <div class="note-header">
+      <div class="note-header-left">
+        <span class="note-icon">📝</span>
+        <div>
+          <div class="note-title" id="noteDocTitle">Document Page Note</div>
+          <div class="note-subtitle" id="noteDocMeta">Page 1 of 1</div>
+        </div>
+      </div>
+      <div class="note-header-actions">
+        <button class="btn btn-sm btn-secondary" onclick="copyNoteContent()" title="Copy text to clipboard">📋 Copy</button>
+        <button class="modal-close" onclick="closePageNote()" title="Close (Esc)">✕</button>
+      </div>
+    </div>
+
+    <!-- Page Pagination Toolbar -->
+    <div class="note-toolbar">
+      <button class="btn btn-sm btn-secondary" id="btnPrevPage" onclick="navigateNotePage(-1)">◀ Prev Page</button>
+      <span class="note-page-badge" id="notePageBadge">Page 1 / 1</span>
+      <button class="btn btn-sm btn-secondary" id="btnNextPage" onclick="navigateNotePage(1)">Next Page ▶</button>
+    </div>
+
+    <!-- Note Content Area -->
+    <div class="note-content-container" id="noteContentContainer">
+      <div style="text-align: center; color: var(--text-muted); padding: 3rem;">Loading page content...</div>
+    </div>
+
+    <!-- Note Footer -->
+    <div class="note-footer">
+      <span class="note-path" id="noteFilePath"></span>
+      <span class="note-badge-safe">🔒 Read-only view &bull; 0 bytes indexed</span>
     </div>
   </div>
 </div>
 
 <script>
   let debounceTimer = null;
+  let currentSelectedFolderPath = 'sample_corpus';
+  let browserCurrentPath = '';
+  let browserParentPath = null;
+
+  // Page Note State
+  let currentNoteDocId = 0;
+  let currentNotePage = 1;
+  let currentNoteTotalPages = 1;
+  let currentSearchQuery = '';
 
   function switchTab(tabId) {
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    event.currentTarget.classList.add('active');
     document.getElementById(tabId).classList.add('active');
-    event.target.classList.add('active');
     if (tabId === 'tabSynonyms') loadSynonyms();
+    if (tabId === 'tabExport') loadExportPreview();
   }
 
-  async function loadStats() {
-    try {
-      const res = await fetch('/api/stats');
-      const data = await res.json();
-      document.getElementById('mTotalDocs').textContent = data.total_documents.toLocaleString();
-      document.getElementById('mWordDocs').textContent = data.number_of_word_documents.toLocaleString() + ' Word Docs';
-      document.getElementById('mOriginalSize').textContent = data.total_original_file_size_fmt;
-      document.getElementById('mPdfPages').textContent = data.number_of_pdf_pages.toLocaleString() + ' PDF Pages';
-      document.getElementById('mDbSize').textContent = data.database_size_fmt;
-      document.getElementById('mTextSize').textContent = data.extracted_text_size_fmt + ' Text';
-      document.getElementById('mScannedPdfs').textContent = data.number_of_scanned_pdfs.toLocaleString();
-      document.getElementById('mLastIndexed').textContent = data.last_indexing_date || 'Never';
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
-  async function checkProgress() {
-    try {
-      const res = await fetch('/api/scan/progress');
-      const p = await res.json();
-      document.getElementById('headerStatus').textContent = p.status.toUpperCase();
-      document.getElementById('progressFile').textContent = p.message || 'Idle';
-      if (p.total > 0) {
-        const pct = Math.round((p.current / p.total) * 100);
-        document.getElementById('progressFill').style.width = pct + '%';
-        document.getElementById('progressPct').textContent = pct + '% (' + p.current + '/' + p.total + ')';
-      }
-      if (p.logs && p.logs.length > 0) {
-        const box = document.getElementById('activityLogs');
-        box.textContent = p.logs.join('\\n');
-        box.scrollTop = box.scrollHeight;
-      }
-      if (p.is_indexing) {
-        setTimeout(checkProgress, 800);
-      } else {
-        loadStats();
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
-  // Folder Manager State
-  let selectedFolders = [];
-  let currentBrowsePath = '';
-  let currentParentPath = null;
-
-  function renderFolderList() {
-    const listEl = document.getElementById('folderList');
-    if (!listEl) return;
-    if (selectedFolders.length === 0) {
-      listEl.innerHTML = '<span style="color: #94a3b8; font-size: 0.88rem; font-style: italic;">No folders selected yet. Use "Open File Explorer", "Browse Folders...", or "Sample Corpus" to add source folders.</span>';
-      return;
-    }
-    listEl.innerHTML = selectedFolders.map((f, idx) => `
-      <div class="folder-chip">
-        <span>📁</span>
-        <span class="folder-chip-path">${escapeHtml(f)}</span>
-        <button class="chip-remove" onclick="removeFolder(${idx})" title="Remove this folder">✕</button>
-      </div>
-    `).join('');
-  }
-
-  function addFolder(path) {
-    if (!path) return;
-    const clean = path.trim();
-    if (clean && !selectedFolders.includes(clean)) {
-      selectedFolders.push(clean);
-      renderFolderList();
-    }
-  }
-
-  function removeFolder(idx) {
-    selectedFolders.splice(idx, 1);
-    renderFolderList();
-  }
-
-  function clearFolders() {
-    selectedFolders = [];
-    const input = document.getElementById('folderInput');
-    if (input) input.value = '';
-    renderFolderList();
-  }
-
-  function addFolderFromInput() {
-    const input = document.getElementById('folderInput');
-    const val = input.value.trim();
-    if (val) {
-      addFolder(val);
-      input.value = '';
-    }
-  }
-
-  function addSampleCorpusFolder() {
-    addFolder('sample_corpus');
-  }
-
-  async function openSystemFolderPicker() {
-    const btn = event?.currentTarget;
-    const origText = btn ? btn.textContent : '';
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = '⏳ Opening File Explorer...';
-    }
-    try {
-      const res = await fetch('/api/fs/native_dialog', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initial_dir: currentBrowsePath || '' })
-      });
-      const data = await res.json();
-      if (data.supported && data.path) {
-        addFolder(data.path);
-      } else if (!data.supported) {
-        // Native dialog not supported without desktop GUI display -> seamless fallback to Web Directory Browser
-        openWebFolderBrowser(currentBrowsePath || '');
-      }
-    } catch (e) {
-      openWebFolderBrowser(currentBrowsePath || '');
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = origText;
-      }
-    }
-  }
-
-  async function openWebFolderBrowser(targetPath) {
-    document.getElementById('folderBrowserModal').style.display = 'flex';
-    await loadDirectory(targetPath || '');
+  // --- Folder Browser ---
+  function openFolderBrowser() {
+    const modal = document.getElementById('folderBrowserModal');
+    if (modal) modal.style.display = 'flex';
+    loadDirectory(currentSelectedFolderPath || '');
   }
 
   function closeFolderBrowser() {
-    document.getElementById('folderBrowserModal').style.display = 'none';
+    const modal = document.getElementById('folderBrowserModal');
+    if (modal) modal.style.display = 'none';
   }
 
   async function loadDirectory(path) {
     const listEl = document.getElementById('fbDirList');
-    listEl.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading folders...</div>';
+    if (!listEl) return;
+    listEl.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">Loading directory...</div>';
 
     try {
       const url = '/api/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
       const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
 
-      currentBrowsePath = data.current_path;
-      currentParentPath = data.parent_path;
-      document.getElementById('fbSelectedPath').textContent = currentBrowsePath;
+      browserCurrentPath = data.current_path;
+      browserParentPath = data.parent_path;
+
+      const pathDisplay = document.getElementById('fbSelectedPath');
+      if (pathDisplay) pathDisplay.textContent = browserCurrentPath;
 
       const upBtn = document.getElementById('fbUpBtn');
-      if (currentParentPath && currentParentPath !== currentBrowsePath) {
-        upBtn.disabled = false;
-        upBtn.style.opacity = '1';
-      } else {
-        upBtn.disabled = true;
-        upBtn.style.opacity = '0.4';
+      if (upBtn) {
+        const canGoUp = Boolean(browserParentPath && browserParentPath !== browserCurrentPath);
+        upBtn.disabled = !canGoUp;
+        upBtn.style.opacity = canGoUp ? '1' : '0.4';
       }
 
       // Render Shortcuts
       const shortcutsEl = document.getElementById('fbShortcuts');
-      shortcutsEl.innerHTML = data.shortcuts.map(s => `
-        <span class="fb-shortcut-pill" onclick="loadDirectory('${escapeHtml(s.path.replace(/\\/g, '/'))}')">${escapeHtml(s.name)}</span>
-      `).join('');
+      if (shortcutsEl && data.shortcuts) {
+        shortcutsEl.innerHTML = data.shortcuts.map(s => {
+          const safeP = encodeURIComponent(s.path);
+          return `<span class="fb-shortcut-pill" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(s.name)}</span>`;
+        }).join('');
+      }
 
       // Render Breadcrumbs
       const bcEl = document.getElementById('fbBreadcrumbs');
-      bcEl.innerHTML = data.breadcrumbs.map((b, i) => `
-        ${i > 0 ? '<span style="color: #94a3b8;">/</span>' : ''}
-        <span class="fb-breadcrumb-item" onclick="loadDirectory('${escapeHtml(b.path.replace(/\\/g, '/'))}')">${escapeHtml(b.name)}</span>
-      `).join('');
+      if (bcEl && data.breadcrumbs) {
+        bcEl.innerHTML = data.breadcrumbs.map((b, i) => {
+          const safeP = encodeURIComponent(b.path);
+          return `${i > 0 ? '<span style="color:#94a3b8;">/</span>' : ''}<span class="fb-breadcrumb-item" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(b.name)}</span>`;
+        }).join('');
+      }
 
       // Render Subdirectories
       if (!data.subdirectories || data.subdirectories.length === 0) {
-        listEl.innerHTML = '<div style="color: #94a3b8; padding: 2rem; text-align: center; grid-column: 1 / -1;">(No subdirectories found in this folder)</div>';
+        listEl.innerHTML = '<div style="color: #94a3b8; padding: 2.5rem; text-align: center; grid-column: 1 / -1;">(No subfolders found in this folder)</div>';
       } else {
-        listEl.innerHTML = data.subdirectories.map(d => `
-          <div class="fb-dir-item" ondblclick="loadDirectory('${escapeHtml(d.path.replace(/\\/g, '/'))}')" onclick="selectFbItem(this, '${escapeHtml(d.path.replace(/\\/g, '/'))}')">
-            <span>📁</span>
-            <span style="font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(d.name)}</span>
-          </div>
-        `).join('');
+        listEl.innerHTML = data.subdirectories.map(d => {
+          const safeP = encodeURIComponent(d.path);
+          return `
+            <div class="fb-dir-item" ondblclick="loadDirectory(decodeURIComponent('${safeP}'))" onclick="selectFbItem(this, decodeURIComponent('${safeP}'))">
+              <span style="font-size: 1.25rem;">📁</span>
+              <span class="fb-dir-name">${escapeHtml(d.name)}</span>
+            </div>
+          `;
+        }).join('');
       }
     } catch (e) {
-      listEl.innerHTML = `<div style="color: var(--accent-red); padding: 1.5rem; text-align: center; grid-column: 1 / -1;">Failed to load directory: ${e}</div>`;
+      listEl.innerHTML = `<div style="color: var(--accent-red); padding: 2rem; text-align: center; grid-column: 1 / -1;">Failed to load directory: ${escapeHtml(e.message)}</div>`;
     }
   }
 
   function selectFbItem(el, path) {
     document.querySelectorAll('.fb-dir-item').forEach(item => item.classList.remove('selected'));
     el.classList.add('selected');
-    currentBrowsePath = path;
-    document.getElementById('fbSelectedPath').textContent = path;
+    browserCurrentPath = path;
+    const pathDisplay = document.getElementById('fbSelectedPath');
+    if (pathDisplay) pathDisplay.textContent = path;
   }
 
   function fbGoUp() {
-    if (currentParentPath) {
-      loadDirectory(currentParentPath);
+    if (browserParentPath) {
+      loadDirectory(browserParentPath);
     }
   }
 
   function confirmFolderSelection() {
-    if (currentBrowsePath) {
-      addFolder(currentBrowsePath);
+    if (browserCurrentPath) {
+      currentSelectedFolderPath = browserCurrentPath;
+      updateSelectedFolderDisplay();
     }
     closeFolderBrowser();
   }
 
-  function escapeHtml(str) {
-    if (!str) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  function resetToSampleCorpus() {
+    currentSelectedFolderPath = 'sample_corpus';
+    updateSelectedFolderDisplay();
   }
 
+  function updateSelectedFolderDisplay() {
+    const el = document.getElementById('displayCurrentFolder');
+    if (el) {
+      el.textContent = currentSelectedFolderPath || 'sample_corpus (Default Medical Literature Archive)';
+    }
+  }
+
+  // --- Indexer Scan ---
   async function startScan() {
-    let folders = [];
-    if (selectedFolders.length > 0) {
-      folders = [...selectedFolders];
-    } else {
-      const val = document.getElementById('folderInput').value.trim();
-      if (val) folders = [val];
-    }
+    const folder = currentSelectedFolderPath || 'sample_corpus';
+    const folders = [folder];
 
-    if (folders.length === 0) {
-      folders = ['sample_corpus'];
-    }
+    document.getElementById('activityLogs').textContent = 'Starting indexing scan for: ' + folder;
+    document.getElementById('scanControls').style.display = 'flex';
+    document.getElementById('indexerBadge').textContent = '● Indexing...';
+    document.getElementById('indexerBadge').style.color = '#f59e0b';
 
-    document.getElementById('activityLogs').textContent = 'Starting indexing scan for ' + folders.length + ' folder(s)...';
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1278,6 +1651,35 @@ SPA_HTML = """<!DOCTYPE html>
       alert(d.error);
     } else {
       setTimeout(checkProgress, 500);
+    }
+  }
+
+  async function checkProgress() {
+    try {
+      const res = await fetch('/api/scan/progress');
+      const p = await res.json();
+
+      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+      document.getElementById('progressFill').style.width = pct + '%';
+      document.getElementById('progressPct').textContent = pct + '%';
+      document.getElementById('progressFile').textContent = p.filename ? `${p.filename} (${p.current}/${p.total})` : p.message;
+
+      if (p.logs && p.logs.length > 0) {
+        const box = document.getElementById('activityLogs');
+        box.textContent = p.logs.join('\n');
+        box.scrollTop = box.scrollHeight;
+      }
+      if (p.is_indexing) {
+        document.getElementById('indexerBadge').textContent = '● Indexing...';
+        document.getElementById('indexerBadge').style.color = '#f59e0b';
+        setTimeout(checkProgress, 800);
+      } else {
+        document.getElementById('indexerBadge').textContent = '● Ready';
+        document.getElementById('indexerBadge').style.color = '#38bdf8';
+        loadStats();
+      }
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -1295,6 +1697,7 @@ SPA_HTML = """<!DOCTYPE html>
     setTimeout(checkProgress, 500);
   }
 
+  // --- Search & Page Notes ---
   function onSearchInput() {
     clearTimeout(debounceTimer);
     const q = document.getElementById('searchInput').value.trim();
@@ -1307,31 +1710,31 @@ SPA_HTML = """<!DOCTYPE html>
       const d = await res.json();
       const list = document.getElementById('suggestionsList');
       if (d.suggestions && d.suggestions.length > 0) {
-        list.innerHTML = d.suggestions.map(s => 
-          `<div class="suggestion-item" onclick="selectSuggestion('${(s.text || s.term || '').replace(/'/g, "\\\\'")}')">${s.display || s.text || s.term}</div>`
-        ).join('');
+        list.innerHTML = d.suggestions.map(s => `
+          <div class="suggestion-item" onclick="applySuggestion('${escapeHtml(s)}')">${escapeHtml(s)}</div>
+        `).join('');
         list.style.display = 'block';
       } else {
         list.style.display = 'none';
       }
-    }, 150);
+    }, 200);
   }
 
-  function selectSuggestion(term) {
-    document.getElementById('searchInput').value = term;
+  function applySuggestion(text) {
+    document.getElementById('searchInput').value = text;
     document.getElementById('suggestionsList').style.display = 'none';
     performSearch();
   }
 
   async function performSearch() {
-    const q = document.getElementById('searchInput').value.trim();
     document.getElementById('suggestionsList').style.display = 'none';
+    const q = document.getElementById('searchInput').value.trim();
     if (!q) return;
 
-    const syn = document.getElementById('synonymCheck').checked;
-    const fmt = document.getElementById('formatFilter').value;
-    const url = `/api/search?q=${encodeURIComponent(q)}&synonyms=${syn}&format=${encodeURIComponent(fmt)}`;
+    const expandSyn = document.getElementById('chkSynonyms').checked;
+    const fmt = document.getElementById('selFormat').value;
 
+    const url = `/api/search?q=${encodeURIComponent(q)}&synonyms=${expandSyn}&format=${fmt}`;
     const res = await fetch(url);
     const d = await res.json();
 
@@ -1340,32 +1743,123 @@ SPA_HTML = """<!DOCTYPE html>
 
     const listEl = document.getElementById('searchResultsList');
     if (d.results.length === 0) {
-      listEl.innerHTML = '<div style="padding:2rem; text-align:center; color:var(--text-muted);">No documents matched your query.</div>';
+      listEl.innerHTML = '<div style="padding:2.5rem; text-align:center; color:var(--text-muted);">No documents matched your query.</div>';
       return;
     }
 
     listEl.innerHTML = d.results.map(r => `
-      <div class="result-card">
+      <div class="result-card" onclick="openPageNote(${r.document_id}, ${r.page_number}, decodeURIComponent('${encodeURIComponent(d.query)}'))">
         <div class="result-header">
-          <span class="result-title">${r.title || r.filename}</span>
+          <span class="result-title">${escapeHtml(r.title || r.filename)}</span>
           <span class="result-badge">${r.file_type}</span>
         </div>
         <div class="result-meta">
-          📁 ${r.filename} &bull; Page ${r.page_number} &bull; Score: ${r.rank_score.toFixed(2)}
+          📁 ${escapeHtml(r.filename)} &bull; <span class="page-tag">Page ${r.page_number}</span> &bull; Score: ${r.rank_score.toFixed(2)}
         </div>
         <div class="result-snippet">${r.snippet_html}</div>
+        <div class="result-footer-actions">
+          <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); openPageNote(${r.document_id}, ${r.page_number}, decodeURIComponent('${encodeURIComponent(d.query)}'));">
+            📝 Open Page Note (Page ${r.page_number})
+          </button>
+          <span class="result-hint">Click card to open page note</span>
+        </div>
       </div>
     `).join('');
   }
 
+  // --- Page Note Implementation ---
+  async function openPageNote(docId, pageNumber, query) {
+    currentNoteDocId = docId;
+    currentNotePage = pageNumber || 1;
+    currentSearchQuery = query || document.getElementById('searchInput')?.value?.trim() || '';
+
+    const modal = document.getElementById('pageNoteModal');
+    if (modal) modal.style.display = 'flex';
+
+    await loadNotePage(currentNoteDocId, currentNotePage);
+  }
+
+  function closePageNote() {
+    const modal = document.getElementById('pageNoteModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function loadNotePage(docId, pageNum) {
+    const container = document.getElementById('noteContentContainer');
+    container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 3rem;">Loading page content...</div>';
+
+    try {
+      const res = await fetch(`/api/document/page?doc_id=${docId}&page=${pageNum}`);
+      if (!res.ok) throw new Error('Failed to load page content.');
+      const data = await res.json();
+
+      currentNotePage = data.page_number;
+      currentNoteTotalPages = data.total_pages;
+
+      document.getElementById('noteDocTitle').textContent = data.filename;
+      document.getElementById('noteDocMeta').textContent = `${data.extension} Document &bull; Page ${data.page_number} of ${data.total_pages}`;
+      document.getElementById('notePageBadge').textContent = `Page ${data.page_number} / ${data.total_pages}`;
+      document.getElementById('noteFilePath').textContent = data.source_path || data.filename;
+
+      document.getElementById('btnPrevPage').disabled = (currentNotePage <= 1);
+      document.getElementById('btnNextPage').disabled = (currentNotePage >= currentNoteTotalPages);
+      document.getElementById('btnPrevPage').style.opacity = (currentNotePage <= 1) ? '0.4' : '1';
+      document.getElementById('btnNextPage').style.opacity = (currentNotePage >= currentNoteTotalPages) ? '0.4' : '1';
+
+      if (!data.content || data.content.trim().length === 0) {
+        container.innerHTML = '<div style="color: #94a3b8; text-align: center; padding: 3rem;">(This page contains no text or is an empty/image page without text)</div>';
+        return;
+      }
+
+      let safeText = escapeHtml(data.content);
+      if (currentSearchQuery) {
+        const terms = currentSearchQuery
+          .replace(/[+\-*()"]/g, ' ')
+          .split(/\s+/)
+          .filter(t => t.length > 2);
+
+        for (const term of terms) {
+          try {
+            const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(${escapedTerm})`, 'gi');
+            safeText = safeText.replace(regex, '<mark>$1</mark>');
+          } catch (e) {}
+        }
+      }
+
+      container.innerHTML = safeText;
+    } catch (e) {
+      container.innerHTML = `<div style="color: var(--accent-red); padding: 2.5rem; text-align: center;">Error loading note: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function navigateNotePage(delta) {
+    const target = currentNotePage + delta;
+    if (target >= 1 && target <= currentNoteTotalPages) {
+      loadNotePage(currentNoteDocId, target);
+    }
+  }
+
+  function copyNoteContent() {
+    const container = document.getElementById('noteContentContainer');
+    if (!container) return;
+    const text = container.innerText || container.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      alert('Page text copied to clipboard!');
+    }).catch(() => {
+      alert('Could not copy automatically. You can manually select and copy the text.');
+    });
+  }
+
+  // --- Synonyms Tab ---
   async function loadSynonyms() {
     const res = await fetch('/api/synonyms');
     const d = await res.json();
     const tbody = document.getElementById('synonymsTableBody');
     tbody.innerHTML = d.synonyms.map(s => `
       <tr>
-        <td><strong>${s.term}</strong></td>
-        <td>${s.expansion}</td>
+        <td><strong>${escapeHtml(s.term)}</strong></td>
+        <td>${escapeHtml(s.expansion)}</td>
       </tr>
     `).join('');
   }
@@ -1384,15 +1878,21 @@ SPA_HTML = """<!DOCTYPE html>
     loadSynonyms();
   }
 
-  async function runExport() {
-    const type = document.getElementById('exportType').value;
-    const compress = document.getElementById('exportCompress').checked;
+  // --- Export Tab ---
+  async function loadExportPreview() {
+    const res = await fetch('/api/export/preview');
+    const d = await res.json();
+    document.getElementById('expActualSize').textContent = d.actual_db_size_fmt;
+    document.getElementById('expCompactSize').textContent = d.estimated_search_db_size_fmt;
+    document.getElementById('expZstdSize').textContent = d.estimated_zstd_size_fmt;
+  }
+
+  async function generateExport() {
     const btn = document.getElementById('btnExport');
-    const resDiv = document.getElementById('exportResult');
-    
     btn.disabled = true;
-    btn.textContent = 'Generating Export...';
-    resDiv.style.display = 'none';
+    btn.textContent = '⏳ Compressing & Exporting...';
+    const type = document.querySelector('input[name="expType"]:checked').value;
+    const compress = document.getElementById('chkZstdCompress').checked;
 
     try {
       const res = await fetch('/api/export', {
@@ -1401,19 +1901,22 @@ SPA_HTML = """<!DOCTYPE html>
         body: JSON.stringify({ type, compress })
       });
       const d = await res.json();
+      const box = document.getElementById('exportResultBox');
+      box.style.display = 'block';
       if (d.error) {
-        alert('Export error: ' + d.error);
+        box.innerHTML = `<div style="color:var(--accent-red);">Export failed: ${escapeHtml(d.error)}</div>`;
       } else {
-        resDiv.style.display = 'block';
-        resDiv.innerHTML = `
-          <div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:1.2rem;">
-            <h3 style="color:#065f46; margin-bottom:0.5rem;">✅ Export Generated Successfully</h3>
-            <p><strong>File:</strong> ${d.filename}</p>
-            <p><strong>Size:</strong> ${d.file_size_fmt} (Compressed from ${d.uncompressed_size_fmt}, ${d.compression_ratio})</p>
-            <p><strong>SHA-256:</strong> <code style="font-size:0.8rem;">${d.sha256}</code></p>
+        box.innerHTML = `
+          <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:1.2rem;">
+            <div style="color:#166534; font-weight:700; margin-bottom:0.5rem;">✅ Export Package Generated Successfully!</div>
+            <div style="font-size:0.9rem; color:#14532d;">
+              File: <strong>${escapeHtml(d.filename)}</strong> (${d.file_size_fmt})<br>
+              Compression: <strong>${escapeHtml(d.compression_ratio)}</strong><br>
+              SHA-256: <code style="font-size:0.8rem;">${escapeHtml(d.sha256)}</code>
+            </div>
             <div style="margin-top:1rem;">
-              <a href="${d.download_url}" download class="btn" style="text-decoration:none; display:inline-block;">
-                📥 Download ${d.filename}
+              <a href="${escapeHtml(d.download_url)}" download class="btn btn-success" style="text-decoration:none; display:inline-flex;">
+                📥 Download ${escapeHtml(d.filename)}
               </a>
             </div>
           </div>
@@ -1427,51 +1930,42 @@ SPA_HTML = """<!DOCTYPE html>
     }
   }
 
+  // --- Stats Dashboard ---
+  async function loadStats() {
+    try {
+      const res = await fetch('/api/stats');
+      const d = await res.json();
+      document.getElementById('mTotalDocs').textContent = d.total_documents.toLocaleString();
+      document.getElementById('mOriginalSize').textContent = d.total_original_file_size_fmt;
+      document.getElementById('mDbSize').textContent = d.database_size_fmt;
+      document.getElementById('mScannedPdfs').textContent = d.number_of_scanned_pdfs.toLocaleString();
+      document.getElementById('mWordDocs').textContent = `${d.number_of_word_documents} Word Docs`;
+      document.getElementById('mPdfPages').textContent = `${d.number_of_pdf_pages} PDF Pages`;
+      document.getElementById('mTextSize').textContent = `${d.extracted_text_size_fmt} Text`;
+      document.getElementById('mLastIndexed').textContent = d.last_indexing_date;
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+
+  // Escape key handler to close modals
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      closePageNote();
+      closeFolderBrowser();
+    }
+  });
+
   // Initial load
+  updateSelectedFolderDisplay();
   loadStats();
   setInterval(loadStats, 10000);
 </script>
-<!-- Web File Explorer Modal -->
-<div id="folderBrowserModal" class="modal-overlay" style="display: none;" onclick="if(event.target===this)closeFolderBrowser();">
-  <div class="modal-box">
-    <div class="modal-header">
-      <div style="font-weight: 700; font-size: 1.1rem; display: flex; align-items: center; gap: 8px;">
-        📂 File Explorer — Select Folder to Index
-      </div>
-      <button class="modal-close" onclick="closeFolderBrowser()">✕</button>
-    </div>
-
-    <!-- Shortcuts Bar -->
-    <div class="fb-shortcuts" id="fbShortcuts"></div>
-
-    <!-- Navigation Breadcrumbs -->
-    <div class="fb-nav-bar">
-      <button class="btn btn-secondary" id="fbUpBtn" onclick="fbGoUp()" title="Go up one level" style="padding: 0.35rem 0.75rem;">
-        ⬆️ Up
-      </button>
-      <div class="fb-breadcrumbs" id="fbBreadcrumbs"></div>
-    </div>
-
-    <!-- Directory Grid -->
-    <div class="fb-list-container" id="fbDirList">
-      <div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading folders...</div>
-    </div>
-
-    <!-- Modal Footer -->
-    <div class="modal-footer">
-      <div style="flex: 1; min-width: 200px;">
-        <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); display: block;">Current Selected Folder:</span>
-        <span id="fbSelectedPath" style="font-family: monospace; font-size: 0.88rem; font-weight: 600; word-break: break-all; color: var(--primary-dark);"></span>
-      </div>
-      <div style="display: flex; gap: 8px;">
-        <button class="btn btn-secondary" onclick="closeFolderBrowser()">Cancel</button>
-        <button class="btn" onclick="confirmFolderSelection()" style="background: #10b981;">
-          ✅ Select This Folder
-        </button>
-      </div>
-    </div>
-  </div>
-</div>
 </body>
 </html>
 """
