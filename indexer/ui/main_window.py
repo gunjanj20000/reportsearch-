@@ -362,6 +362,7 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             self.engine.db.clear_database()
+            self._load_folders()
             self._refresh_stats()
             self._log("[INFO] Database wiped successfully.")
             QMessageBox.information(self, "Database Reset", "The database has been cleared.")

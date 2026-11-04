@@ -9,6 +9,35 @@ interface SearchResultsProps {
   onPageChange: (page: number) => void;
 }
 
+function sanitizeSnippet(snipHtml: string): string {
+  if (!snipHtml || !snipHtml.includes('|')) return snipHtml;
+  return snipHtml
+    .split('\n')
+    .map((line) => {
+      if (!line.includes('|')) return line;
+      const parts = line.split('|').map((p) => p.trim());
+      const deduped: string[] = [];
+      for (const p of parts) {
+        if (!p) continue;
+        const plain = p.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ');
+        if (
+          deduped.length === 0 ||
+          deduped[deduped.length - 1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ') !== plain
+        ) {
+          deduped.push(p);
+        }
+      }
+      if (
+        deduped.length > 1 &&
+        new Set(deduped.map((c) => c.replace(/<[^>]+>/g, '').replace(/\s+/g, ' '))).size === 1
+      ) {
+        deduped.length = 1;
+      }
+      return deduped.join(' | ');
+    })
+    .join('\n');
+}
+
 export const SearchResults: React.FC<SearchResultsProps> = ({
   response,
   isLoading,
@@ -127,7 +156,7 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
               {/* High-contrast Snippet */}
               <div
                 className="text-xs text-slate-300 leading-relaxed font-sans snippet-text bg-slate-950/60 p-3 rounded-xl border border-slate-800/60"
-                dangerouslySetInnerHTML={{ __html: item.snip }}
+                dangerouslySetInnerHTML={{ __html: sanitizeSnippet(item.snip) }}
               />
 
               {/* Card Footer Actions */}

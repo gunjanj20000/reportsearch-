@@ -130,6 +130,9 @@ class DocxExtractor(BaseExtractor):
                                     row_cells.append(txt)
 
                     if row_cells:
+                        # Collapse whole-row identical duplicates (e.g. conclusion merged across all columns)
+                        if len(row_cells) > 1 and len(set(" ".join(c.split()) for c in row_cells)) == 1:
+                            row_cells = [row_cells[0]]
                         table_lines.append(" | ".join(row_cells))
 
                 if table_lines:

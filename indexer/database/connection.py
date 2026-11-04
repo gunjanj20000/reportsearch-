@@ -313,7 +313,18 @@ class DatabaseManager:
                 conn.execute("DELETE FROM document_collections")
                 conn.execute("DELETE FROM collections")
                 conn.execute("DELETE FROM documents")
+                conn.execute("DELETE FROM indexed_folders")
             conn.execute("VACUUM")
+
+        # Clean archive cache directory
+        try:
+            cache_dir = self.db_path.parent / "archive_cache"
+            if cache_dir.exists():
+                import shutil
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     def get_indexed_folders(self) -> List[Dict[str, Any]]:
         """Retrieve all configured folders with live document counts."""

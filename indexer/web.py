@@ -128,21 +128,106 @@ def open_native_folder_dialog(initial_dir: Optional[str] = None) -> Tuple[bool, 
     return False, None, "Native OS file dialog not supported on this host environment without desktop display."
 
 
+def try_mount_block_device(dev_path: str, label: str = "") -> Optional[str]:
+    """Attempt to mount an unmounted block device using udisksctl or sudo mount."""
+    clean_p = str(dev_path).strip()
+    if not clean_p.startswith("/dev/"):
+        return None
+
+    # 1. Try udisksctl
+    udisksctl = shutil.which("udisksctl")
+    if udisksctl:
+        try:
+            res = subprocess.run([udisksctl, "mount", "-b", clean_p], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                words = res.stdout.strip().split()
+                if "at" in words:
+                    mnt_idx = words.index("at") + 1
+                    if mnt_idx < len(words):
+                        return words[mnt_idx]
+        except Exception:
+            pass
+
+    # 2. Try sudo mount into /media
+    sudo = shutil.which("sudo")
+    mount_bin = shutil.which("mount")
+    if sudo and mount_bin:
+        clean_name = "".join(c for c in (label or Path(clean_p).name) if c.isalnum() or c in ("-", "_")).strip() or "usb_drive"
+        target_dir = Path("/media") / clean_name
+        try:
+            subprocess.run([sudo, "mkdir", "-p", str(target_dir)], capture_output=True, timeout=3)
+            res = subprocess.run([sudo, mount_bin, clean_p, str(target_dir)], capture_output=True, timeout=5)
+            if res.returncode == 0 and target_dir.is_dir():
+                return str(target_dir.resolve())
+        except Exception:
+            pass
+    return None
+
+
 def get_attached_storage_devices() -> List[Dict[str, str]]:
     """
     Detect connected removable storage devices:
     - USB pendrives / flash drives
-    - External hard drives / SSDs
-    - SD cards
-    - Mounts under /media, /run/media, and /mnt
+    - External hard drives / SSDs (SATA, SCSI, USB, NVMe)
+    - Removable and hotplug block devices
+    - Mounts under /media, /run/media, /mnt, and virtual machine shares
     - Windows drive letters
     """
     devices: List[Dict[str, str]] = []
     seen = set()
-    excluded = ("/boot", "/sys", "/proc", "/dev", "/run/lock", "/run/systemd")
+    excluded = ("/boot", "/sys", "/proc", "/dev", "/run/lock", "/run/systemd", "/snap")
 
-    # 1. Linux removable media detection
+    # 1. Linux storage & removable media detection
     if sys.platform.startswith("linux") or "bsd" in sys.platform:
+        # A. Use lsblk JSON for all block devices
+        lsblk = shutil.which("lsblk")
+        if lsblk:
+            try:
+                res = subprocess.run(
+                    [lsblk, "-J", "-o", "NAME,PATH,MOUNTPOINT,LABEL,FSTYPE,RM,HOTPLUG,TRAN,MODEL,SIZE"],
+                    capture_output=True, text=True, timeout=4
+                )
+                if res.returncode == 0 and res.stdout:
+                    data = json.loads(res.stdout)
+
+                    def process_block_item(d: Dict[str, Any]):
+                        mnt = d.get("mountpoint")
+                        dev_path = d.get("path", "")
+                        name = d.get("name", "")
+                        lbl = d.get("label") or d.get("model") or name
+                        sz = d.get("size", "")
+                        fst = d.get("fstype", "")
+                        tran = str(d.get("tran", "")).lower()
+                        is_rem = bool(d.get("rm") or d.get("hotplug") or tran in ("usb", "sata", "nvme"))
+
+                        # If unmounted and has supported filesystem, try to auto-mount
+                        if not mnt and fst in ("ntfs", "vfat", "exfat", "ext4", "ext3", "ext2", "xfs", "btrfs", "iso9660", "fuseblk"):
+                            if not any(ex in dev_path for ex in ("sda", "loop")):
+                                new_mnt = try_mount_block_device(dev_path, lbl)
+                                if new_mnt:
+                                    mnt = new_mnt
+
+                        if mnt and mnt not in ("/", "/boot", "/boot/efi") and not any(mnt.startswith(ex) for ex in excluded):
+                            resolved_mnt = str(Path(mnt).resolve())
+                            if resolved_mnt not in seen:
+                                icon = "🔌" if (is_rem or "usb" in dev_path.lower() or "usb" in mnt.lower()) else "💾"
+                                desc = f"{lbl} ({sz})" if sz else lbl
+                                devices.append({
+                                    "name": f"{icon} {desc}",
+                                    "path": resolved_mnt,
+                                    "type": "removable" if is_rem else "drive"
+                                })
+                                seen.add(resolved_mnt)
+
+                        for child in d.get("children", []):
+                            process_block_item(child)
+
+                    for bdev in data.get("blockdevices", []):
+                        process_block_item(bdev)
+            except Exception as e:
+                logger.debug(f"lsblk detection error: {e}")
+
+        # B. Check standard removable mount roots: /media, /run/media, /mnt
         candidate_roots = ["/media", "/run/media", "/mnt"]
         for base in ["/media", "/run/media"]:
             if os.path.exists(base):
@@ -171,16 +256,16 @@ def get_attached_storage_devices() -> List[Dict[str, str]]:
                 except Exception:
                     pass
 
-        # Also inspect /proc/mounts for external block devices
+        # C. Inspect /proc/mounts for any additional external or shared mounts
         if os.path.exists("/proc/mounts"):
-            target_fs = {"vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "ext4", "iso9660"}
+            target_fs = {"vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "ext4", "iso9660", "vboxsf", "vmhgfs", "9p", "virtiofs"}
             try:
                 with open("/proc/mounts", "r") as f:
                     for line in f:
                         parts = line.strip().split()
                         if len(parts) >= 3:
                             dev, mnt, fst = parts[0], parts[1], parts[2]
-                            if (dev.startswith(("/dev/sd", "/dev/mmc", "/dev/disk")) or mnt.startswith(("/media", "/run/media", "/mnt"))) and fst in target_fs:
+                            if (dev.startswith(("/dev/sd", "/dev/mmc", "/dev/disk", "/dev/nvme", "/dev/vd")) or mnt.startswith(("/media", "/run/media", "/mnt")) or fst in ("vboxsf", "vmhgfs", "9p", "virtiofs")) and fst in target_fs:
                                 if mnt not in seen and not any(mnt.startswith(ex) for ex in excluded) and mnt not in ("/", "/home", "/tmp"):
                                     label = os.path.basename(mnt) or mnt
                                     icon = "🔌" if any(w in label.lower() for w in ["usb", "pen", "flash", "sd"]) else "💾"
@@ -299,6 +384,13 @@ def test_storage_path(path_str: str) -> Dict[str, Any]:
     resolved = resolve_network_path(clean)
     p = Path(resolved)
 
+    # If block device (e.g. /dev/sdb1), try to auto-mount
+    if clean.startswith("/dev/"):
+        auto_mnt = try_mount_block_device(clean)
+        if auto_mnt and Path(auto_mnt).is_dir():
+            resolved = auto_mnt
+            p = Path(resolved)
+
     # If doesn't exist, try gio mount if on Linux and it starts with smb:// or \\
     if not p.exists() and sys.platform.startswith("linux") and (clean.startswith(("\\\\", "//", "smb://"))):
         smb_url = clean
@@ -393,6 +485,8 @@ def sanitize_table_text(text: str) -> str:
                 norm = " ".join(p.split())
                 if not deduped or " ".join(deduped[-1].split()) != norm:
                     deduped.append(p)
+            if len(deduped) > 1 and len(set(" ".join(p.split()) for p in deduped)) == 1:
+                deduped = [deduped[0]]
             if deduped:
                 cleaned_lines.append(" | ".join(deduped))
         else:
@@ -593,7 +687,7 @@ class MedicalSearchHandler(BaseHTTPRequestHandler):
                         "title": r.title,
                         "page_number": r.page_number,
                         "paragraph_number": r.paragraph_number,
-                        "snippet_html": r.snippet,
+                        "snippet_html": sanitize_table_text(r.snippet),
                         "rank_score": r.rank_score,
                         "source_path": r.source_path,
                         "file_size": r.file_size
@@ -2079,6 +2173,9 @@ SPA_HTML = r"""<!DOCTYPE html>
 <header>
   <h1>📑 Universal Document Search & Indexer</h1>
   <div style="display:flex; align-items:center; gap:12px;">
+    <button class="btn btn-sm btn-danger" onclick="resetDatabaseDefault()" title="Wipe all indexed data and reset database to default clean state (0 documents)" style="background:#dc2626; padding:0.45rem 0.9rem; font-size:0.82rem;">
+      <span>🗑️</span> <strong>Reset Default</strong>
+    </button>
     <a href="/pwa/" target="_blank" class="pwa-header-link" title="Open Mobile Search PWA (Offline SQLite WASM + OPFS)">📱 Mobile PWA</a>
     <div class="status-badge" id="headerStatus">● Ready</div>
   </div>
@@ -2137,6 +2234,9 @@ SPA_HTML = r"""<!DOCTYPE html>
           </button>
           <button class="btn btn-success" id="btnIndexAll" onclick="startScanAll()" title="Scan and index all configured folders">
             <span>🚀</span> <strong>Index All Folders</strong>
+          </button>
+          <button class="btn btn-sm btn-danger" onclick="resetDatabaseDefault()" title="Wipe all indexed data and reset database to default clean state (0 documents)" style="background:#fee2e2; color:#b91c1c; border:1px solid #fca5a5; padding:0.6rem 1rem;">
+            <span>🗑️</span> <strong>Reset Default</strong>
           </button>
         </div>
       </div>
@@ -2284,9 +2384,9 @@ SPA_HTML = r"""<!DOCTYPE html>
     <!-- Storage Shortcuts Section (Local, USB Pendrives, External HDDs, Network Shares) -->
     <div class="fb-shortcuts-section">
       <!-- Attached Removable Devices (Pendrives / External Hard Drives) -->
-      <div class="fb-shortcuts-category" id="fbDevicesRow" style="display:none;">
+      <div class="fb-shortcuts-category" id="fbDevicesRow">
         <span class="fb-category-label">🔌 Attached:</span>
-        <div id="fbDevicesPills" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+        <div id="fbDevicesPills" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;"></div>
       </div>
 
       <!-- Network Shares -->
@@ -2305,7 +2405,7 @@ SPA_HTML = r"""<!DOCTYPE html>
     <!-- Direct Path Entry / UNC Network Share Input -->
     <div class="fb-path-bar">
       <span style="font-size:0.8rem; font-weight:700; color:var(--text-muted);">PATH:</span>
-      <input type="text" id="fbDirectInput" class="fb-path-input" placeholder="Enter path or \\server\share or /media/user/USB..." onkeydown="if(event.key==='Enter')fbGoDirect();">
+      <input type="text" id="fbDirectInput" class="fb-path-input" placeholder="Enter path (e.g. /media/..., /mnt/..., /dev/sdb1, \\server\share)..." onkeydown="if(event.key==='Enter')fbGoDirect();">
       <button class="btn btn-sm btn-primary" onclick="fbGoDirect()">Go / Connect</button>
     </div>
 
@@ -2464,14 +2564,19 @@ SPA_HTML = r"""<!DOCTYPE html>
       // Render Attached Removable Devices (USB Pendrives, External HDDs)
       const devRow = document.getElementById('fbDevicesRow');
       const devPills = document.getElementById('fbDevicesPills');
-      if (data.attached_devices && data.attached_devices.length > 0) {
+      if (devRow && devPills) {
         devRow.style.display = 'flex';
-        devPills.innerHTML = data.attached_devices.map(d => {
-          const safeP = encodeURIComponent(d.path);
-          return `<span class="fb-shortcut-pill pill-device" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(d.name)}</span>`;
-        }).join('');
-      } else {
-        devRow.style.display = 'none';
+        let pillsHtml = '';
+        if (data.attached_devices && data.attached_devices.length > 0) {
+          pillsHtml = data.attached_devices.map(d => {
+            const safeP = encodeURIComponent(d.path);
+            return `<span class="fb-shortcut-pill pill-device" onclick="loadDirectory(decodeURIComponent('${safeP}'))">${escapeHtml(d.name)}</span>`;
+          }).join('');
+        } else {
+          pillsHtml = `<span style="color:#64748b; font-size:0.8rem; align-self:center;">(No external disk detected)</span>`;
+        }
+        pillsHtml += `<button class="btn btn-sm btn-secondary" onclick="rescanDevices()" style="padding:2px 8px; font-size:0.75rem; margin-left:6px;" title="Rescan and mount connected USB / external hard disks">🔄 Rescan Hard Disks</button>`;
+        devPills.innerHTML = pillsHtml;
       }
 
       // Render Network Shares
@@ -2545,8 +2650,8 @@ SPA_HTML = r"""<!DOCTYPE html>
     const val = input.value.trim();
     if (!val) return;
 
-    // Check if network UNC or non-local path
-    if (val.startsWith('\\\\') || val.startsWith('//') || val.startsWith('smb://')) {
+    // Check if network UNC, non-local, or /dev/ block device
+    if (val.startsWith('\\\\') || val.startsWith('//') || val.startsWith('smb://') || val.startsWith('/dev/')) {
       input.disabled = true;
       try {
         const res = await fetch('/api/fs/check_path', {
@@ -2558,7 +2663,7 @@ SPA_HTML = r"""<!DOCTYPE html>
         if (d.valid) {
           loadDirectory(d.resolved_path);
         } else {
-          alert('Network Share Error: ' + (d.error || 'Could not reach share.'));
+          alert('Storage Error: ' + (d.error || 'Could not reach path.'));
         }
       } catch (e) {
         loadDirectory(val);
@@ -2567,6 +2672,39 @@ SPA_HTML = r"""<!DOCTYPE html>
       }
     } else {
       loadDirectory(val);
+    }
+  }
+
+  async function rescanDevices() {
+    const devPills = document.getElementById('fbDevicesPills');
+    if (devPills) devPills.innerHTML = '<span style="color:#94a3b8; font-size:0.8rem;">Detecting and mounting attached hard disks...</span>';
+    try {
+      await fetch('/api/fs/devices');
+      loadDirectory(browserCurrentPath || '');
+    } catch (e) {
+      console.error(e);
+      loadDirectory(browserCurrentPath || '');
+    }
+  }
+
+  async function resetDatabaseDefault() {
+    const confirmMsg = "Are you sure you want to completely reset the database back to default?\n\nThis will remove ALL indexed documents, clear search indexes, and reset the document count back to 0 (clean state).";
+    if (!confirm(confirmMsg)) return;
+
+    try {
+      document.getElementById('activityLogs').textContent = 'Resetting database to default clean state...';
+      const res = await fetch('/api/clear', { method: 'POST' });
+      const d = await res.json();
+      if (d.error) {
+        alert('Reset failed: ' + d.error);
+      } else {
+        await loadStats();
+        await loadIndexedFolders();
+        document.getElementById('activityLogs').textContent = 'Database successfully reset to default clean state (0 documents).';
+        alert('Database has been reset to default clean state (0 documents).');
+      }
+    } catch (e) {
+      alert('Error resetting database: ' + e.message);
     }
   }
 
@@ -2937,6 +3075,9 @@ SPA_HTML = r"""<!DOCTYPE html>
             if (deduped.length === 0 || deduped[deduped.length - 1].replace(/\s+/g, ' ') !== norm) {
               deduped.push(c);
             }
+          }
+          if (deduped.length > 1 && new Set(deduped.map(c => c.replace(/\s+/g, ' '))).size === 1) {
+            deduped.length = 1;
           }
           if (deduped.length === 0) continue;
           html += '<tr>';

@@ -176,6 +176,11 @@ def test_sanitize_table_text():
     assert "OPERATOR: | Dr. Prakash Chandwani / Dr. Divij Khetan" in cleaned
     assert cleaned.count("Dr. Prakash Chandwani / Dr. Divij Khetan") == 1
 
+    # Whole-row identical duplicates collapse to single cell
+    raw2 = "CONCLUSION Normal coronaries | CONCLUSION Normal coronaries | CONCLUSION Normal coronaries"
+    cleaned2 = sanitize_table_text(raw2)
+    assert cleaned2 == "CONCLUSION Normal coronaries"
+
 
 def test_api_document_page_invalid(web_server):
     """Test /api/document/page returns 404 for nonexistent document."""

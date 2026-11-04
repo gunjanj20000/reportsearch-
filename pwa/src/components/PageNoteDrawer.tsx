@@ -122,6 +122,9 @@ export const PageNoteDrawer: React.FC<PageNoteDrawerProps> = ({
                           deduped.push(c);
                         }
                       }
+                      if (deduped.length > 1 && new Set(deduped.map((c) => c.replace(/\s+/g, ' '))).size === 1) {
+                        deduped.length = 1;
+                      }
                       if (deduped.length === 0) return null;
                       return (
                         <tr
